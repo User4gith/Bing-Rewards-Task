@@ -462,22 +462,38 @@ export default class BrowserFunc {
     }
 
     private async fetchBootstrapHtml(page: Page, url: string, route: string): Promise<string> {
+        // 优先使用 page.request（标准方式）
         try {
             const res = await page.request.get(url, { timeout: 20000 })
             if (res.ok()) return await res.text()
-
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'BOOTSTRAP',
-                `获取 ${route} HTML 失败 | 状态码=${res.status()} - 快照和 action 发现可能不完整`
-            )
-        } catch (error) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'BOOTSTRAP',
-                `获取 ${route} HTML 失败 | 错误=${error instanceof Error ? error.message : String(error)} - 快照和 action 发现可能不完整`
-            )
+        } catch {
+            // 忽略，进入浏览器内 fetch 兜底
         }
+
+        // 兜底：使用浏览器内的原生 fetch（绕过代理对 APIRequestContext 的阻止）
+        try {
+            const text = await page.evaluate(async (fetchUrl: string) => {
+                try {
+                    const res = await fetch(fetchUrl, { credentials: 'same-origin' })
+                    if (!res.ok) return null
+                    return await res.text()
+                } catch {
+                    return null
+                }
+            }, url)
+
+            if (text && typeof text === 'string' && text.length > 0) {
+                return text
+            }
+        } catch {
+            // 忽略，返回空字符串
+        }
+
+        this.bot.logger.warn(
+            this.bot.isMobile,
+            'BOOTSTRAP',
+            `获取 ${route} HTML 失败 - 快照和 action 发现可能不完整`
+        )
 
         return ''
     }
@@ -571,10 +587,39 @@ export default class BrowserFunc {
 
         await Promise.all(
             paths.map(async path => {
+                const url = URLs.rewards.path(path)
+                // 优先使用 page.request（标准方式）
                 try {
-                    const res = await page.request.get(URLs.rewards.path(path))
+                    const res = await page.request.get(url, { timeout: 15000 })
                     if (res.ok()) {
                         result.set(path, await res.text())
+                        return
+                    }
+                } catch {
+                    // 忽略，进入浏览器内 fetch 兜底
+                }
+
+                // 兜底：使用浏览器内的原生 fetch（绕过代理对 APIRequestContext 的阻止）
+                // 通过 page.evaluate 在页面上下文中执行，走浏览器的网络栈
+                try {
+                    const text = await page.evaluate(async (fetchUrl: string) => {
+                        try {
+                            const res = await fetch(fetchUrl, { credentials: 'same-origin' })
+                            if (!res.ok) return null
+                            const ct = res.headers.get('content-type') ?? ''
+                            // 仅接受 JavaScript 内容
+                            if (ct && !ct.includes('javascript') && !ct.includes('ecmascript')) {
+                                // 允许无 content-type 的情况（某些代理不返回）
+                            }
+                            return await res.text()
+                        } catch {
+                            return null
+                        }
+                    }, url)
+
+                    if (text && typeof text === 'string' && text.length > 0) {
+                        result.set(path, text)
+                        return
                     }
                 } catch (error) {
                     this.bot.logger.debug(
