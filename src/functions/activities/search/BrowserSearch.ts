@@ -23,6 +23,7 @@ interface SessionStats {
     totalGained: number
     performed: number
     stagnant: number
+    error?: string
 }
 
 export class Search extends BaseActivity {
@@ -44,10 +45,17 @@ export class Search extends BaseActivity {
                 )
             }
 
+            const complete = tracker.done() && !stats.error
+            this.bot.taskCoverage.ledger.set(`search:${isMobile ? 'mobile' : 'desktop'}`, {
+                status: complete ? 'complete' : 'failed',
+                reason: complete
+                    ? '已核验搜索配额完成'
+                    : (stats.error ?? `搜索中止；${tracker.progress()}；连续未得分=${stats.stagnant}`)
+            })
             this.bot.logger.info(
                 isMobile,
                 tracker.context,
-                `必应搜索完成 | 获得积分=${stats.totalGained} | 当前余额=${this.bot.userData.currentPoints} | 之前余额=${startBalance} | 搜索次数=${stats.performed} | ${tracker.progress()}`
+                `必应搜索${complete ? '完成' : '中止（尚未完成）'} | 获得积分=${stats.totalGained} | 当前余额=${this.bot.userData.currentPoints} | 之前余额=${startBalance} | 搜索次数=${stats.performed} | ${tracker.progress()}${stats.error ? ` | 错误=${stats.error}` : ''}`
             )
             return stats.totalGained
         } finally {
@@ -141,6 +149,7 @@ export class Search extends BaseActivity {
 
             return stats
         } catch (error) {
+            stats.error = error instanceof Error ? error.message : String(error)
             this.bot.logger.error(
                 isMobile,
                 tracker.context,
@@ -266,7 +275,7 @@ class PointsTracker implements SearchTracker {
             `剩余搜索积分 | Edge=${this.missing.edgePoints} | 桌面端=${this.missing.desktopPoints} | 移动端=${this.missing.mobilePoints}`
         )
 
-        const ratio = getSearchTargetRatio()
+        const ratio = this.bot.config.taskCoverage?.enabled === false ? getSearchTargetRatio() : 1
         if (ratio < 1 && this.missing.totalPoints > 0) {
             // 单次搜索计 3 分，保留分取整到 3 的倍数，避免出现"差 1~2 分"的精确残留
             this.reservedPoints = Math.floor((this.missing.totalPoints * (1 - ratio)) / 3) * 3
@@ -281,18 +290,10 @@ class PointsTracker implements SearchTracker {
 
         if (this.missing.totalPoints <= 0) {
             if (!this.runOnZeroPoints) {
-                this.bot.logger.info(
-                    this.isMobile,
-                    this.context,
-                    '无可赚搜索积分，跳过（runOnZeroPoints 已禁用）'
-                )
+                this.bot.logger.info(this.isMobile, this.context, '无可赚搜索积分，跳过（runOnZeroPoints 已禁用）')
                 return false
             }
-            this.bot.logger.info(
-                this.isMobile,
-                this.context,
-                '未报告搜索积分，但 runOnZeroPoints 已启用，仍继续搜索'
-            )
+            this.bot.logger.info(this.isMobile, this.context, '未报告搜索积分，但 runOnZeroPoints 已启用，仍继续搜索')
         }
         return true
     }

@@ -1,6 +1,9 @@
 import type { MicrosoftRewardsBot } from '../index'
+import type { Counters } from '../interface/DashboardData'
+import { canonicalTaskUrl, htmlTaskHints } from './HtmlTaskHints'
 
 export interface ParsedOffer {
+    promotionType?: string
     offerId: string
     hash: string | null
     title: string
@@ -18,6 +21,8 @@ export interface ParsedOffer {
 }
 
 export interface QuestChild {
+    activityType?: number | null
+    title?: string
     offerId: string
     hash: string | null
     points: number
@@ -65,6 +70,9 @@ export interface AccountState {
 }
 
 export interface PageSnapshot {
+    missingSources?: string[]
+    searchCounters?: Partial<Counters>
+    quests?: ParentQuest[]
     offers: ParsedOffer[]
     reportable: ParsedOffer[]
     streaks: StreakState[]
@@ -81,12 +89,27 @@ export default class ReactFunc {
 
     // Parse all available data from the provided pages into one snapshot
     public snapshotPage(html: string | readonly string[]): PageSnapshot {
-        const combined = this.concatFlightChunks(html)
+        const pages = typeof html === 'string' ? [html] : html
+        const rawHtml = pages.join('\n')
+        const scripts = [...rawHtml.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)].map(match => match[1]).join('\n')
+        const combined = this.concatFlightChunks(html) + '\n' + scripts
 
         const offers = this.parseOffers(combined)
+        for (const hint of htmlTaskHints(rawHtml)) {
+            const existing = offers.find(
+                offer =>
+                    offer.offerId === hint.offerId ||
+                    (offer.destination && canonicalTaskUrl(offer.destination) === canonicalTaskUrl(hint.destination))
+            )
+            if (existing) {
+                existing.title ||= hint.title
+                existing.destination ||= hint.destination
+                existing.points ||= hint.points
+            } else offers.push(hint)
+        }
         const streaks = this.parseStreaks(combined)
         const streakProtection = this.parseStreakProtection(combined)
-        const account = this.parseAccountData(combined)
+        const account = this.parseAccountData(combined, rawHtml)
         const accountEmail = this.bot.currentAccountEmail
 
         this.bot.logger.info(
@@ -96,12 +119,31 @@ export default class ReactFunc {
         )
 
         return {
+            searchCounters: this.parseSearchCounters(combined),
+            quests: this.snapshotQuestList(...pages),
             offers,
             reportable: offers.filter(o => o.reportable),
             streaks,
             streakProtection,
             account
         }
+    }
+
+    private parseSearchCounters(combined: string): Partial<Counters> {
+        const result: Partial<Counters> = {}
+        for (const [key, aliases] of [
+            ['pcSearch', ['pcSearch', 'PCSearch']],
+            ['mobileSearch', ['mobileSearch', 'MobileSearch']]
+        ] as const) {
+            for (const alias of aliases) {
+                const carrier = this.extractObjects(combined, `"${alias}"`).find(obj => Array.isArray(obj[alias]))
+                if (carrier) {
+                    result[key] = carrier[alias] as Counters[typeof key]
+                    break
+                }
+            }
+        }
+        return result
     }
     public getStreakProtection(html: string): StreakProtectionState | null {
         return this.parseStreakProtection(this.concatFlightChunks(html))
@@ -272,9 +314,12 @@ export default class ReactFunc {
                 const offerId = obj.offerId as string | undefined
                 if (!offerId) continue
 
-                const hash = (obj.hash as string | null) ?? null
-                const isCompleted = ((obj.isCompleted ?? obj.complete) as boolean | undefined) === true
-                const isLocked = (obj.isLocked as boolean | undefined) === true
+                const hash =
+                    typeof obj.hash === 'string' && obj.hash !== '$undefined' && obj.hash.trim() ? obj.hash : null
+                const isCompleted =
+                    ((obj.isCompleted ?? obj.complete) as boolean | undefined) === true ||
+                    (Number(obj.pointProgressMax) > 0 && Number(obj.pointProgress) >= Number(obj.pointProgressMax))
+                const isLocked = obj.isLocked === true || obj.isDisabled === true
                 const date = this.normaliseDate(obj.date as string | undefined)
                 const attributes =
                     obj.attributes && typeof obj.attributes === 'object'
@@ -292,6 +337,7 @@ export default class ReactFunc {
                 const reportable = !!hash && !isCompleted && !isLocked && (date === null || date <= today)
 
                 const candidate: ParsedOffer = {
+                    promotionType: typeof obj.promotionType === 'string' ? obj.promotionType : undefined,
                     offerId,
                     hash,
                     title: (obj.title as string) ?? '',
@@ -327,6 +373,7 @@ export default class ReactFunc {
                 existing.unlockCriteria ??= candidate.unlockCriteria
                 existing.date ??= candidate.date
                 existing.activityType ??= candidate.activityType
+                existing.promotionType ||= candidate.promotionType
                 existing.reportable =
                     !!existing.hash &&
                     !existing.isCompleted &&
@@ -444,7 +491,7 @@ export default class ReactFunc {
         }
     }
 
-    private parseAccountData(combined: string): AccountState {
+    private parseAccountData(combined: string, rawHtml: string): AccountState {
         const empty: AccountState = {
             level: null,
             pointsProgress: null,
@@ -476,13 +523,13 @@ export default class ReactFunc {
             // when the JSON payload yielded nothing, and only extract values
             // that are actually present in the page.
             if (account.availablePoints === null) {
-                const mobilePoints = this.extractMobilePointsFromHtml(combined)
+                const mobilePoints = this.extractMobilePointsFromHtml(rawHtml)
                 if (mobilePoints !== null) {
                     account.availablePoints = mobilePoints
                 }
             }
             if (account.level === null) {
-                const mobileLevel = this.extractMobileLevelFromHtml(combined)
+                const mobileLevel = this.extractMobileLevelFromHtml(rawHtml)
                 if (mobileLevel !== null) {
                     account.level = mobileLevel
                 }
@@ -526,23 +573,11 @@ export default class ReactFunc {
             // Header pattern: <p>NUMBER</p> directly followed by membership img/alt.
             // This is the account header, not task card numbers.
             const headerRe =
-                /<p[^>]*>\s*([\d,]+)\s*<\/p>\s*<img[^>]*alt="([^"]*(?:银牌会员|金牌会员|Silver Member|Gold Member)[^"]*)"/i
+                /<p[^>]*>\s*([\d,]+)\s*<\/p>\s*<img[^>]*alt=["']\s*(银牌会员|金牌会员|Silver Member|Gold Member)\s*["']/i
             const hm = headerRe.exec(html)
             if (hm) {
                 const value = parseInt(hm[1]!.replace(/,/g, ''), 10)
                 if (Number.isFinite(value)) return value
-            }
-            // Fallback: any <p>NUMBER</p> near a membership label within 500 chars.
-            const pRe = /<p[^>]*>\s*([\d,]+)\s*<\/p>/gi
-            const levelRe = /银牌会员|金牌会员|Silver Member|Gold Member/i
-            let m: RegExpExecArray | null
-            while ((m = pRe.exec(html)) !== null) {
-                const pos = m.index ?? 0
-                const window = html.substring(Math.max(0, pos - 500), pos + 500)
-                if (levelRe.test(window)) {
-                    const value = parseInt(m[1]!.replace(/,/g, ''), 10)
-                    if (Number.isFinite(value)) return value
-                }
             }
             return null
         } catch {
@@ -561,18 +596,13 @@ export default class ReactFunc {
         try {
             // Header pattern: level img adjacent to points <p>
             const headerRe =
-                /<p[^>]*>\s*[\d,]+\s*<\/p>\s*<img[^>]*alt="([^"]*)"/i
+                /<p[^>]*>\s*[\d,]+\s*<\/p>\s*<img[^>]*alt=["']\s*(银牌会员|金牌会员|Silver Member|Gold Member)\s*["']/i
             const hm = headerRe.exec(html)
             if (hm) {
                 const alt = hm[1] ?? ''
                 if (/金牌|Gold/i.test(alt)) return 2
                 if (/银牌|Silver/i.test(alt)) return 1
             }
-            // Fallback: first level label in document order (header appears first)
-            const firstGold = html.search(/金牌会员|Gold Member/i)
-            const firstSilver = html.search(/银牌会员|Silver Member/i)
-            if (firstGold >= 0 && (firstSilver < 0 || firstGold < firstSilver)) return 2
-            if (firstSilver >= 0) return 1
             return null
         } catch {
             return null
@@ -751,10 +781,16 @@ export default class ReactFunc {
 
         for (const obj of this.extractObjects(combined, '"offerId"')) {
             const offerId = obj.offerId as string | undefined
-            if (!offerId || !offerId.includes('pcchild') || seen.has(offerId)) continue
+            if (
+                !offerId ||
+                this.isParentQuestId(offerId) ||
+                seen.has(offerId) ||
+                !('hash' in obj || 'isCompleted' in obj || 'complete' in obj)
+            )
+                continue
             seen.add(offerId)
 
-            const hash = (obj.hash as string | null) ?? null
+            const hash = typeof obj.hash === 'string' && obj.hash !== '$undefined' && obj.hash.trim() ? obj.hash : null
             const points = (obj.points as number) ?? (obj.pointProgressMax as number) ?? 0
             const isCompleted = ((obj.isCompleted ?? obj.complete) as boolean | undefined) === true
             const isLocked = (obj.isLocked as boolean | undefined) === true
@@ -763,6 +799,11 @@ export default class ReactFunc {
             const reportable = !!hash && !isCompleted && !isLocked && !isDisabled
 
             out.push({
+                title: typeof obj.title === 'string' ? obj.title : undefined,
+                activityType:
+                    Number.isInteger(Number(obj.activityType)) && Number(obj.activityType) > 0
+                        ? Number(obj.activityType)
+                        : null,
                 offerId,
                 hash,
                 points,
@@ -870,6 +911,7 @@ export default class ReactFunc {
 
     private normaliseDate(rawDate: string | undefined): string | null {
         if (!rawDate) return null
+        if (/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) return rawDate
         const m = rawDate.match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
         if (!m) return null
         return `${m[3]}-${m[1]}-${m[2]}`

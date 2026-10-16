@@ -23,6 +23,12 @@ export interface Config {
     consoleLogFilter: LogFilter
     webhook: ConfigWebhook
     humanize?: HumanizeConfig
+    taskCoverage?: {
+        enabled: boolean
+        maxPasses: number
+        verificationAttempts: number
+        timeZone?: string
+    }
 }
 
 export interface HumanizeConfig {

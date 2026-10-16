@@ -1,10 +1,9 @@
 import type { Dashboard } from '../../../interface/DashboardData'
 import type { SearchTracker } from '../../../interface/Search'
 import type { MicrosoftRewardsBot } from '../../../index'
+import { collectPromotions, findPromotion, isBareSearchCard } from '../rewards/TaskDiscovery'
 
 const BONUS_STAGNANT_LIMIT = 20
-
-const BING_TRACKING_PARAMS = new Set(['form', 'ocid', 'publ', 'crea', 'pc', 'channel', 'mkt', 'cc', 'setlang'])
 
 export class BonusTracker implements SearchTracker {
     public readonly context = 'SEARCH-BONUS'
@@ -102,43 +101,17 @@ export class BonusTracker implements SearchTracker {
     }
 
     private findSearchBonusOffer(dashboard: Dashboard) {
-        const pools = [
-            ...(dashboard.morePromotions ?? []),
-            ...(dashboard.morePromotionsWithoutPromotionalItems ?? []),
-            ...(dashboard.promotionalItems ?? [])
-        ]
+        const pools = collectPromotions(dashboard).map(task => task.promotion)
 
         return pools.find(p => {
             if (!p || p.complete) return false
             if (!(p.pointProgressMax > p.pointProgress)) return false
             if ((p.promotionType ?? '').toLowerCase() !== 'urlreward') return false
-            return this.isBareBingSearchDestination(p.destinationUrl)
+            return isBareSearchCard(p)
         })
     }
 
     private findOfferById(dashboard: Dashboard, offerId: string) {
-        const pools = [
-            ...Object.values(dashboard.dailySetPromotions ?? {}).flat(),
-            ...(dashboard.morePromotions ?? []),
-            ...(dashboard.morePromotionsWithoutPromotionalItems ?? []),
-            ...(dashboard.promotionalItems ?? [])
-        ]
-        return pools.find(o => o.offerId === offerId)
-    }
-
-    private isBareBingSearchDestination(url?: string): boolean {
-        if (!url) return false
-        try {
-            const u = new URL(url)
-            const isBingHost = /(^|\.)bing\.com$/i.test(u.hostname)
-            const isRootPath = u.pathname === '' || u.pathname === '/'
-            if (!isBingHost || !isRootPath) return false
-            for (const key of u.searchParams.keys()) {
-                if (!BING_TRACKING_PARAMS.has(key.toLowerCase())) return false
-            }
-            return true
-        } catch {
-            return false
-        }
+        return findPromotion(dashboard, offerId)
     }
 }

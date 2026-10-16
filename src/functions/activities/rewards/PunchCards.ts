@@ -2,316 +2,244 @@ import { URLs } from '../../../constants/urls'
 import { BaseActivity } from '../BaseActivity'
 import type { ParentQuest, QuestChild } from '../../../browser/ReactFunc'
 import type { BasePromotion, DashboardData, PunchCard } from '../../../interface/DashboardData'
+import { isLockedPromotion, promotionComplete } from './TaskDiscovery'
 
 export class PunchCards extends BaseActivity {
-    public async runMobile(data: DashboardData): Promise<void> {
+    async runMobile(data: DashboardData): Promise<void> {
+        await this.run(data)
+    }
+
+    async runDesktop(): Promise<void> {
+        if (!this.bot.config.workers.doPunchCards) return
         try {
-            await this.run(data)
+            await this.run(await this.bot.browser.func.getDashboardData(this.bot.cookies.desktop))
         } catch (error) {
-            this.bot.logger.error(
-                'main',
-                'PUNCHCARD',
-                `移动端打卡任务失败 | ${error instanceof Error ? error.message : String(error)}`
-            )
+            this.failure('source:punchCards', error)
         }
     }
 
-    public async runDesktop(): Promise<void> {
-        if (!this.bot.config.workers.doPunchCards) return
-
-        let data: DashboardData
-        try {
-            data = await this.bot.browser.func.getDashboardData(this.bot.cookies.desktop)
-        } catch (error) {
-            this.bot.logger.warn(
-                'main',
-                'PUNCHCARD',
-                `桌面端打卡数据不可用 | ${error instanceof Error ? error.message : String(error)}`
-            )
-            return
-        }
-
-        try {
-            await this.run(data)
-        } catch (error) {
-            this.bot.logger.error(
-                'main',
-                'PUNCHCARD',
-                `桌面端打卡任务失败 | ${error instanceof Error ? error.message : String(error)}`
-            )
-        }
+    private failure(id: string, error: unknown): void {
+        const reason = error instanceof Error ? error.message : String(error)
+        this.bot.taskCoverage.ledger.set(id, { status: 'unverified', category: 'punchCards', reason })
+        this.bot.logger.warn(this.bot.isMobile, 'PUNCHCARD', `任务未核验 | id=${id} | 原因=${reason}`)
     }
 
     private async run(data: DashboardData): Promise<void> {
-        const parents = await this.getParentQuests()
-        if (!parents) return
-
+        const ledger = this.bot.taskCoverage.ledger
+        const apiCards = data.dashboard.punchCards ?? []
         const apiById = new Map(
-            (data.dashboard.punchCards ?? [])
-                .filter(card => card.parentPromotion?.offerId)
-                .map(card => [card.parentPromotion.offerId, card] as const)
+            apiCards.filter(card => card.parentPromotion?.offerId).map(card => [card.parentPromotion.offerId, card])
         )
-
-        this.mergeApiParents(parents, apiById)
-        const pending = parents.filter(parent => {
-            if (parent.complete) return false
-            return !this.bot.config.skipNonPointTasks || parent.pointProgressMax > 0
+        let pages: Array<string | null> = []
+        try {
+            pages = await Promise.all([
+                this.bot.browser.func.getRewardsPageHtml(URLs.rewards.earn, '/earn'),
+                this.bot.browser.func.getRewardsPageHtml(URLs.rewards.dashboard, '/dashboard')
+            ])
+        } catch (error) {
+            this.failure('source:punchCards', error)
+        }
+        const html = pages.filter((page): page is string => !!page)
+        const parents = new Map(
+            (html.length ? this.bot.browser.react.snapshotQuestList(...html) : []).map(parent => [
+                parent.offerId,
+                parent
+            ])
+        )
+        // API tasks remain executable even if HTML discovery fails.
+        for (const [id, card] of apiById) {
+            const p = card.parentPromotion
+            parents.set(id, {
+                offerId: id,
+                title: p.title || parents.get(id)?.title || id,
+                pointProgressMax: Number(p.pointProgressMax) || parents.get(id)?.pointProgressMax || 0,
+                complete: promotionComplete(p)
+            })
+        }
+        ledger.set('source:punchCards', {
+            title: '多步骤卡片任务来源',
+            category: 'coverage',
+            status: html.length ? 'complete' : 'unverified',
+            reason: html.length ? '已合并页面任务和 API 卡片' : '卡片页面不可用；保留 API 任务，但不能确认全量卡片'
         })
 
-        if (!pending.length) {
-            this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', '没有可执行的任务')
-            return
-        }
-
-        this.bot.logger.info(
-            this.bot.isMobile,
-            'PUNCHCARD',
-            `发现 ${pending.length} 个未完成任务 | apiMatched=${pending.filter(parent => apiById.has(parent.offerId)).length}`
-        )
-
-        for (const parent of pending) {
-            try {
-                await this.solvePunchCard(parent, apiById.get(parent.offerId))
-            } catch (error) {
-                this.bot.logger.error(
-                    this.bot.isMobile,
-                    'PUNCHCARD',
-                    `解决任务 "${parent.title || parent.offerId}" 时出错 | message=${
-                        error instanceof Error ? error.message : String(error)
-                    }`
-                )
-            }
-        }
-
-        this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', '任务处理完毕')
-    }
-
-    private async getParentQuests(): Promise<ParentQuest[] | null> {
-        try {
-            const earn = await this.bot.browser.func.getRewardsPageHtml(URLs.rewards.earn, '/earn')
-            if (!earn) {
-                this.bot.logger.warn(this.bot.isMobile, 'PUNCHCARD', '/earn 不可用 - 无法获取任务列表')
-                return null
-            }
-
-            const parents = this.bot.browser.react.snapshotQuestList(earn)
-            if (parents.length) return parents
-
-            const dashboard = await this.bot.browser.func.getRewardsPageHtml(URLs.rewards.dashboard, '/dashboard')
-            return dashboard ? this.bot.browser.react.snapshotQuestList(earn, dashboard) : parents
-        } catch (error) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'PUNCHCARD',
-                `获取任务列表失败 | ${error instanceof Error ? error.message : String(error)}`
-            )
-            return null
-        }
-    }
-
-    private mergeApiParents(parents: ParentQuest[], apiById: Map<string, PunchCard>): void {
-        const seen = new Set(parents.map(parent => parent.offerId))
-
-        for (const card of apiById.values()) {
-            const promotion = card.parentPromotion
-            if (!promotion?.offerId || seen.has(promotion.offerId)) continue
-
-            parents.push({
-                offerId: promotion.offerId,
-                title: promotion.title ?? '',
-                pointProgressMax: promotion.pointProgressMax ?? 0,
-                complete: Boolean(promotion.complete)
+        for (const parent of parents.values()) {
+            ledger.set(parent.offerId, {
+                title: parent.title,
+                category: 'punchCards',
+                pointsMax: parent.pointProgressMax,
+                status: parent.complete ? 'complete' : 'pending',
+                reason: parent.complete ? '官网父卡片已完成' : '等待执行子任务'
             })
-            seen.add(promotion.offerId)
+            if (parent.complete) continue
+            if (this.bot.config.skipNonPointTasks && parent.pointProgressMax <= 0) {
+                ledger.set(parent.offerId, { status: 'disabled', reason: '配置跳过零分父任务，可能包含有积分的子项' })
+                continue
+            }
+            try {
+                await this.solve(parent, apiById.get(parent.offerId))
+            } catch (error) {
+                this.failure(parent.offerId, error)
+            }
         }
-
-        for (const parent of parents) {
-            if (parent.pointProgressMax > 0) continue
-            parent.pointProgressMax = apiById.get(parent.offerId)?.parentPromotion?.pointProgressMax ?? 0
-        }
-    }
-
-    private async solvePunchCard(parent: ParentQuest, apiCard: PunchCard | undefined): Promise<void> {
-        const parentId = parent.offerId
-        const title = parent.title || apiCard?.parentPromotion?.title || parentId
-        const children = await this.getQuestChildren(parentId, title)
-        if (!children) return
-
-        const apiChildById = new Map(
-            (apiCard?.childPromotions ?? [])
-                .filter(child => child.offerId)
-                .map(child => [child.offerId, child] as const)
-        )
-        const ordered = [...children].sort(
-            (left, right) =>
-                (apiChildById.get(left.offerId)?.priority ?? Number.MAX_SAFE_INTEGER) -
-                (apiChildById.get(right.offerId)?.priority ?? Number.MAX_SAFE_INTEGER)
-        )
-
         this.bot.logger.info(
             this.bot.isMobile,
             'PUNCHCARD',
-            `正在解决 "${title}" | children=${ordered.length} | reportable=${ordered.filter(child => child.reportable).length}`
+            `卡片检查结束 | 发现父任务=${parents.size} | 结果以逐项验收为准`
         )
+    }
 
-        const startBalance = this.bot.userData.currentPoints
-        let reported = 0
-        let remaining = 0
+    private fromApi(p: BasePromotion): QuestChild {
+        const hash = typeof p.hash === 'string' && p.hash !== '$undefined' ? p.hash : null
+        const complete = promotionComplete(p)
+        const locked = isLockedPromotion(p)
+        return {
+            offerId: p.offerId,
+            title: p.title,
+            hash,
+            points: Number(p.pointProgressMax) || 0,
+            activityType:
+                Number.isInteger(Number(p.activityType)) && Number(p.activityType) > 0 ? Number(p.activityType) : null,
+            isCompleted: complete,
+            isLocked: locked,
+            isDisabled: false,
+            reportable: !!hash && !complete && !locked
+        }
+    }
 
-        for (const child of ordered) {
-            const apiChild = apiChildById.get(child.offerId)
-
-            if (!child.reportable) {
-                remaining += 1
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'PUNCHCARD',
-                    `跳过 ${child.offerId}：不可上报（locked=${child.isLocked} disabled=${child.isDisabled} done=${child.isCompleted} hash=${Boolean(child.hash)}）`
-                )
-                continue
+    private async children(parent: ParentQuest, api?: PunchCard): Promise<QuestChild[]> {
+        const byId = new Map<string, QuestChild>()
+        try {
+            const html = await this.bot.browser.func.getRewardsPageHtml(
+                URLs.rewards.quest(parent.offerId),
+                `/earn/quest/${parent.offerId}`
+            )
+            if (html) for (const child of this.bot.browser.react.snapshotQuestPage(html)) byId.set(child.offerId, child)
+        } catch (error) {
+            this.failure(parent.offerId, error)
+        }
+        for (const p of api?.childPromotions ?? []) {
+            if (!p.offerId) continue
+            const candidate = this.fromApi(p)
+            const htmlChild = byId.get(p.offerId)
+            if (htmlChild) {
+                candidate.hash ||= htmlChild.hash
+                candidate.activityType ??= htmlChild.activityType
+                candidate.isCompleted ||= htmlChild.isCompleted
+                candidate.isLocked ||= htmlChild.isLocked
+                candidate.reportable = !!candidate.hash && !candidate.isCompleted && !candidate.isLocked
             }
+            byId.set(p.offerId, candidate)
+        }
+        return [...byId.values()]
+    }
 
-            if (this.isSearchQuotaChild(child.offerId, apiChild)) {
-                remaining += 1
-                this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `跳过 ${child.offerId}：多天搜索任务`)
-                continue
+    private async refreshedCard(id: string): Promise<PunchCard | undefined> {
+        const data = await this.bot.browser.func.getDashboardData()
+        return data.dashboard.punchCards?.find(card => card.parentPromotion?.offerId === id)
+    }
+
+    private async solve(parent: ParentQuest, initial?: PunchCard): Promise<void> {
+        const ledger = this.bot.taskCoverage.ledger
+        let api = initial
+        for (let pass = 0; pass < (this.bot.config.taskCoverage?.maxPasses ?? 3); pass++) {
+            const children = await this.children(parent, api)
+            if (!children.length) {
+                this.failure(parent.offerId, '未获取到子任务，不能视为已完成')
+                return
             }
-
-            if (this.isClaimChild(child.offerId, apiChild)) {
-                if (!this.bot.config.autoClaimPunchcardRewards) {
-                    remaining += 1
-                    this.bot.logger.info(
-                        this.bot.isMobile,
-                        'PUNCHCARD',
-                        `"${title}" 的奖励可手动兑换 | offerId=${child.offerId}`
-                    )
+            const apiById = new Map((api?.childPromotions ?? []).map(p => [p.offerId, p]))
+            children.sort(
+                (a, b) =>
+                    Number(this.isClaim(a.offerId)) - Number(this.isClaim(b.offerId)) ||
+                    (apiById.get(a.offerId)?.priority ?? 0) - (apiById.get(b.offerId)?.priority ?? 0)
+            )
+            let progressed = false
+            for (const child of children) {
+                ledger.set(child.offerId, {
+                    title: child.title || child.offerId,
+                    category: 'punchCards',
+                    pointsMax: child.points,
+                    status: child.isCompleted ? 'complete' : child.isLocked || child.isDisabled ? 'blocked' : 'pending',
+                    reason: child.isCompleted
+                        ? '官网子任务已完成'
+                        : child.isLocked || child.isDisabled
+                          ? '官网子任务锁定或禁用'
+                          : '待执行'
+                })
+                if (child.isCompleted || child.isLocked || child.isDisabled) continue
+                const promotion = apiById.get(child.offerId)
+                if (
+                    (promotion?.promotionType ?? '').toLowerCase() === 'search' ||
+                    /search.*(?:day|streak)|(?:day|streak).*search/i.test(child.offerId)
+                ) {
+                    const multiDay = Number(promotion?.activityProgressMax) > 1 && /day|streak/i.test(child.offerId)
+                    ledger.set(child.offerId, {
+                        status: multiDay ? 'deferred' : 'pending',
+                        reason: multiDay ? '多天累计任务，不能在一天内提前完成' : '依赖实际搜索配额，搜索结束后再次检查'
+                    })
                     continue
                 }
-                await this.bot.activities.doClaimReward(child, parentId)
-            } else {
-                await this.reportQuestChild(child, parentId)
-            }
-
-            reported += 1
-            await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 15000))
-        }
-
-        const gained = this.bot.userData.currentPoints - startBalance
-        this.bot.logger.info(
-            this.bot.isMobile,
-            'PUNCHCARD',
-            `任务 "${title}" ${remaining === 0 ? 'COMPLETE' : 'in progress'} | reported=${reported}` +
-                `${remaining ? ` | remaining=${remaining}` : ''} | pointsGained=${gained}` +
-                ` | currentBalance=${this.bot.userData.currentPoints}` +
-                `${parent.pointProgressMax > 0 ? ` | targetPoints=${parent.pointProgressMax}` : ''}`,
-            gained > 0 ? 'green' : undefined
-        )
-    }
-
-    private async getQuestChildren(parentId: string, title: string): Promise<QuestChild[] | null> {
-        try {
-            const questUrl = URLs.rewards.quest(parentId)
-            const html = await this.bot.browser.func.getRewardsPageHtml(questUrl, `/earn/quest/${parentId}`)
-            if (!html) {
-                this.bot.logger.warn(this.bot.isMobile, 'PUNCHCARD', `"${title}" 的任务页面不可用`)
-                return null
-            }
-
-            const children = this.bot.browser.react.snapshotQuestPage(html)
-            if (!children.length) {
-                this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `"${title}" 没有可执行的子任务`)
-                return null
-            }
-            return children
-        } catch (error) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'PUNCHCARD',
-                `获取 "${title}" 的任务页面失败 | ${error instanceof Error ? error.message : String(error)}`
-            )
-            return null
-        }
-    }
-
-    private async reportQuestChild(child: QuestChild, parentId: string): Promise<void> {
-        const actionId = this.bot.nextActions.reportActivity
-        if (!actionId) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'PUNCHCARD',
-                `跳过 ${child.offerId}：未发现 "reportActivity"`
-            )
-            return
-        }
-        if (!child.hash) {
-            this.bot.logger.warn(this.bot.isMobile, 'PUNCHCARD', `跳过 ${child.offerId}：没有有效的 hash`)
-            return
-        }
-
-        const oldBalance = this.bot.userData.currentPoints
-        try {
-            const questUrl = URLs.rewards.quest(parentId)
-            const { status, acknowledged } = await this.bot.browser.func.reportServerAction(
-                actionId,
-                [
-                    child.hash,
-                    11,
-                    {
-                        offerid: child.offerId,
-                        isPromotional: '$undefined',
-                        timezoneOffset: this.bot.userData.timezoneOffset
-                    }
-                ],
-                {
-                    url: questUrl,
-                    referer: questUrl,
-                    routerStateTree: this.bot.browser.react.questRouterStateTree(parentId)
+                if (this.isClaim(child.offerId) && !this.bot.config.autoClaimPunchcardRewards) {
+                    ledger.set(child.offerId, { status: 'disabled', reason: '配置禁止自动领取已赚取的卡片积分' })
+                    continue
                 }
-            )
-
-            const newBalance = await this.bot.browser.func.getCurrentPoints()
-            const gained = newBalance - oldBalance
-            if (gained > 0) {
-                this.bot.userData.currentPoints = newBalance
-                this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + gained
+                if (!child.reportable || !child.hash || !this.bot.nextActions.reportActivity) {
+                    this.failure(child.offerId, '缺少可执行的 hash 或 reportActivity 元数据')
+                    continue
+                }
+                ledger.attempt(child.offerId)
+                const url = URLs.rewards.quest(parent.offerId)
+                try {
+                    await this.bot.browser.func.reportServerAction(
+                        this.bot.nextActions.reportActivity,
+                        [
+                            child.hash,
+                            child.activityType ?? 11,
+                            {
+                                offerid: child.offerId,
+                                isPromotional: '$undefined',
+                                timezoneOffset: this.bot.userData.timezoneOffset
+                            }
+                        ],
+                        {
+                            url,
+                            referer: url,
+                            routerStateTree: this.bot.browser.react.questRouterStateTree(parent.offerId)
+                        }
+                    )
+                    await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 15000))
+                    const freshApi = await this.refreshedCard(parent.offerId)
+                    const freshChildren = await this.children(parent, freshApi)
+                    if (freshChildren.find(p => p.offerId === child.offerId)?.isCompleted) {
+                        ledger.set(child.offerId, { status: 'complete', reason: '上报后已刷新官网核验子任务完成' })
+                        progressed = true
+                    } else this.failure(child.offerId, '上报后官网未确认子任务完成')
+                    api = freshApi ?? api
+                } catch (error) {
+                    this.failure(child.offerId, error)
+                }
             }
-
-            this.bot.logger.info(
-                this.bot.isMobile,
-                'PUNCHCARD',
-                `已上报子任务 | offerId=${child.offerId} | status=${status} | acknowledged=${acknowledged}` +
-                    ` | pointsGained=${gained} | currentBalance=${newBalance}`,
-                gained > 0 || acknowledged ? 'green' : undefined
-            )
-        } catch (error) {
-            this.bot.logger.error(
-                this.bot.isMobile,
-                'PUNCHCARD',
-                `上报子任务出错 | offerId=${child.offerId} | message=${
-                    error instanceof Error ? error.message : String(error)
-                }`
-            )
+            api = (await this.refreshedCard(parent.offerId)) ?? api
+            if (api && promotionComplete(api.parentPromotion)) {
+                ledger.set(parent.offerId, { status: 'complete', reason: '已刷新官网核验父卡片完成' })
+                return
+            }
+            if (!progressed) break
         }
+        const remaining = (await this.children(parent, api)).filter(child => !child.isCompleted)
+        if (
+            remaining.length &&
+            remaining.every(child => ['deferred', 'blocked'].includes(ledger.get(child.offerId)?.status ?? ''))
+        ) {
+            ledger.set(parent.offerId, {
+                status: 'deferred',
+                reason: '多天累计或官网锁定条件尚未满足，今日可执行子项已处理'
+            })
+        } else this.failure(parent.offerId, '父卡片仍未完成；检查子项、领取条件或多天累计要求')
     }
 
-    private isSearchQuotaChild(offerId: string, promotion?: BasePromotion): boolean {
-        if (promotion) {
-            const type = (promotion.promotionType ?? '').toLowerCase()
-            const attributeType = String(this.getAttribute(promotion, 'type') ?? '').toLowerCase()
-            const progressMax = Number(promotion.activityProgressMax ?? 0)
-            if (type === 'search' || attributeType === 'search' || progressMax > 1) return true
-        }
-        return /search/i.test(offerId) && /(day|streak|\dx)/i.test(offerId)
-    }
-
-    private isClaimChild(offerId: string, promotion?: BasePromotion): boolean {
-        if (/\/redeem\//.test((promotion?.destinationUrl ?? '').toLowerCase())) return true
-        return /(redeem|claim|(?<!url)reward)/i.test(offerId)
-    }
-
-    private getAttribute(promotion: BasePromotion, key: string): unknown {
-        const attributes = promotion.attributes
-        if (!attributes || typeof attributes !== 'object') return undefined
-        return (attributes as Record<string, unknown>)[key]
+    private isClaim(id: string): boolean {
+        return /(redeem|claim|(?<!url)reward)/i.test(id)
     }
 }

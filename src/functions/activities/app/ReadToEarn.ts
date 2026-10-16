@@ -8,11 +8,7 @@ import { BaseActivity } from '../BaseActivity'
 export class ReadToEarn extends BaseActivity {
     public async doReadToEarn() {
         if (!this.bot.accessToken) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'READ-TO-EARN',
-                '跳过：应用访问令牌不可用，此活动需要它！'
-            )
+            this.bot.logger.warn(this.bot.isMobile, 'READ-TO-EARN', '跳过：应用访问令牌不可用，此活动需要它！')
             return
         }
 
@@ -27,12 +23,20 @@ export class ReadToEarn extends BaseActivity {
         )
 
         try {
+            const dashboard = await this.bot.browser.func.getAppDashboardData()
+            const offer = dashboard.response.promotions.find(
+                p => (p.attributes.type ?? '').toLowerCase() === 'msnreadearn'
+            )
+            if (!offer?.attributes.offerid) {
+                this.bot.logger.info(this.bot.isMobile, 'READ-TO-EARN', '官网当前未提供读文赚积分活动')
+                return
+            }
             const jsonData = {
                 amount: 1,
                 id: '1',
                 type: 101,
                 attributes: {
-                    offerid: 'ENUS_readarticle3_30points'
+                    offerid: offer.attributes.offerid
                 },
                 country: this.bot.userData.geoLocale
             }

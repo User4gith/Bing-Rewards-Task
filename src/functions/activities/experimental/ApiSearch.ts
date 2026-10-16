@@ -140,11 +140,7 @@ export class ApiSearch extends BaseActivity {
                 }
 
                 if (stagnant >= STAGNANT_LIMIT) {
-                    this.bot.logger.warn(
-                        isMobile,
-                        'SEARCH-BING',
-                        `连续 ${STAGNANT_LIMIT} 次搜索未得分，中止`
-                    )
+                    this.bot.logger.warn(isMobile, 'SEARCH-BING', `连续 ${STAGNANT_LIMIT} 次搜索未得分，中止`)
                     break
                 }
 
@@ -156,13 +152,23 @@ export class ApiSearch extends BaseActivity {
                 )
             }
 
+            const finalQuota = await this.searchProgress.getMissing(isMobile)
+            const complete = finalQuota.totalPoints <= 0
+            this.bot.taskCoverage.ledger.set(`search:${isMobile ? 'mobile' : 'desktop'}`, {
+                status: complete ? 'complete' : 'failed',
+                reason: complete ? '已刷新官网核验搜索配额完成' : `搜索中止，官网仍剩余 ${finalQuota.totalPoints} 分`
+            })
             this.bot.logger.info(
                 isMobile,
                 'SEARCH-BING',
-                `Bing 搜索完成 | 获得积分=${totalGained} | 当前余额=${this.bot.userData.currentPoints} | 原余额=${startBalance} | 搜索次数=${performed}`
+                `Bing 搜索${complete ? '完成' : '中止（尚未完成）'} | 获得积分=${totalGained} | 当前余额=${this.bot.userData.currentPoints} | 原余额=${startBalance} | 搜索次数=${performed}`
             )
             return totalGained
         } catch (error) {
+            this.bot.taskCoverage.ledger.set(`search:${isMobile ? 'mobile' : 'desktop'}`, {
+                status: 'failed',
+                reason: error instanceof Error ? error.message : String(error)
+            })
             this.bot.logger.error(
                 isMobile,
                 'SEARCH-BING',

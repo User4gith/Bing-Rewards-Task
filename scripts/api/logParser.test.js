@@ -14,6 +14,42 @@ function apply(state, raw, receivedAt) {
     return entry
 }
 
+test('partial task audit and incomplete account end never become successful', () => {
+    const state = createRunState()
+    apply(state, line('alpha', 'ACCOUNT-START', '开始处理账户: alpha@example.com | geoLocale: CN | locale: zh-CN'))
+    apply(
+        state,
+        line('alpha', 'TASK-AUDIT', '任务验收 | 状态=仍有未完成或待核验项 | 总数=8 | 已核验=6 | 未解决=2 | 不适用=0')
+    )
+    apply(
+        state,
+        line(
+            'alpha',
+            'ACCOUNT-END',
+            '账户未完成: alpha@example.com | 获得积分=30 | 原余额=100 | 现余额=130 | 持续秒数=10 | 未解决任务=2'
+        )
+    )
+    assert.equal(state.accounts['alpha@example.com'].success, false)
+    assert.equal(state.accounts['alpha@example.com'].taskAudit.unresolved, 2)
+    apply(
+        state,
+        line(
+            'alpha',
+            'RUN-END',
+            '全部账户处理结束（有未完成项） | 处理账户数=1 | 获得积分=30 | 原余额=100 | 现余额=130 | 运行分钟数=1'
+        )
+    )
+    assert.equal(state.finished, true)
+})
+
+test('repeated activity summaries at the same balance do not double-count credit', () => {
+    const state = createRunState()
+    apply(state, line('alpha', 'ACCOUNT-START', 'Starting account: alpha@example.com | geoLocale: CN | locale: zh-CN'))
+    apply(state, line('alpha', 'SEARCH-BING', '获得积分=3 | 当前余额=103'))
+    apply(state, line('alpha', 'SEARCH-BING', '必应搜索完成 | 获得积分=3 | 当前余额=103'))
+    assert.equal(state.accounts['alpha@example.com'].live.gained, 3)
+})
+
 test('parses the logger envelope and strips ANSI formatting', () => {
     const entry = parseLogLine(
         `\u001b[32m${line('account.n', 'LOGIN', 'Starting login process', 'INFO', 'MOBILE')}\u001b[39m`

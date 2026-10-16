@@ -138,8 +138,8 @@ export function mapFlyoutToDashboard(data: RewardsFlyoutData): DashboardData {
             lifetimeGivingPoints: numberOrFallback(flyoutStatus.lifetimeGivingPoints, userInfo.lifetimeGivingPoints),
             isRewardsUser: true,
             counters: {
-                pcSearch: counters.PCSearch ?? counters.pcSearch ?? [],
-                mobileSearch: counters.MobileSearch ?? counters.mobileSearch ?? [],
+                pcSearch: counters.PCSearch ?? counters.pcSearch,
+                mobileSearch: counters.MobileSearch ?? counters.mobileSearch,
                 activityAndQuiz: counters.ActivityAndQuiz ?? counters.activityAndQuiz ?? [],
                 dailyPoint: counters.DailyPoint ?? counters.dailyPoint ?? []
             }
@@ -156,6 +156,7 @@ export function mapFlyoutToDashboard(data: RewardsFlyoutData): DashboardData {
     } as unknown as Dashboard
 
     return {
+        source: 'flyout',
         dashboard,
         profile
     } as DashboardData

@@ -1,138 +1,100 @@
-/**
- * 移动端账户数据解析单元测试
- * 
- * 测试 src/browser/ReactFunc.ts 中的移动端 HTML 回退解析逻辑：
- * - extractMobilePointsFromHtml
- * - extractMobileLevelFromHtml
- * 
- * 运行：npx ts-node src/__tests__/mobile-parse.test.ts
- * 或：node dist/__tests__/mobile-parse.test.js
- */
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import ReactFunc from '../browser/ReactFunc'
+import type { MicrosoftRewardsBot } from '../index'
 
-// 与 ReactFunc.ts 中的实现保持一致（复制用于独立测试）
-function extractMobilePointsFromHtml(html: string): number | null {
-    try {
-        const headerRe =
-            /<p[^>]*>\s*([\d,]+)\s*<\/p>\s*<img[^>]*alt="([^"]*(?:银牌会员|金牌会员|Silver Member|Gold Member)[^"]*)"/i
-        const hm = headerRe.exec(html)
-        if (hm) {
-            const value = parseInt(hm[1]!.replace(/,/g, ''), 10)
-            if (Number.isFinite(value)) return value
-        }
-        const pRe = /<p[^>]*>\s*([\d,]+)\s*<\/p>/gi
-        const levelRe = /银牌会员|金牌会员|Silver Member|Gold Member/i
-        let m: RegExpExecArray | null
-        while ((m = pRe.exec(html)) !== null) {
-            const pos = m.index ?? 0
-            const window = html.substring(Math.max(0, pos - 500), pos + 500)
-            if (levelRe.test(window)) {
-                const value = parseInt(m[1]!.replace(/,/g, ''), 10)
-                if (Number.isFinite(value)) return value
-            }
-        }
-        return null
-    } catch {
-        return null
+const bot = {
+    logger: { info() {}, debug() {}, warn() {}, error() {} },
+    isMobile: true
+} as unknown as MicrosoftRewardsBot
+const parser = new ReactFunc(bot)
+const flight = (value: unknown): string =>
+    `<script>self.__next_f.push([1,${JSON.stringify(JSON.stringify(value))}])</script>`
+
+for (const [label, points, level] of [
+    ['银牌会员', '1,225', 1],
+    ['金牌会员', '5,000', 2],
+    ['Silver Member', '999', 1],
+    ['Gold Member', '10,000', 2],
+    ['银牌会员', '0', 1],
+    ['金牌会员', '1,234,567', 2]
+] as const) {
+    test(`production snapshot parses ${label} ${points}`, () => {
+        const result = parser.snapshotPage(`<div><p>${points}</p><img alt="${label}"></div>`)
+        assert.equal(result.account.availablePoints, Number(points.replaceAll(',', '')))
+        assert.equal(result.account.level, level)
+    })
+}
+
+test('HTML account fallback is connected even when membership Flight exists', () => {
+    const result = parser.snapshotPage(
+        '<div><p>1,225</p><img alt="银牌会员"></div>' + flight({ level: 1, pointsProgress: 0, pointsRemaining: 0 })
+    )
+    assert.equal(result.account.availablePoints, 1225)
+})
+
+test('upgrade advertising and card numbers are never account balance or membership', () => {
+    for (const html of [
+        '<div><p>50</p><span>升级到金牌会员享受更多权益</span></div>',
+        '<div><p>30</p><p>100</p></div>',
+        '<p>50</p><img alt="升级到金牌会员">'
+    ]) {
+        const result = parser.snapshotPage(html)
+        assert.equal(result.account.availablePoints, null)
+        assert.equal(result.account.level, null)
     }
-}
+})
 
-function extractMobileLevelFromHtml(html: string): number | null {
-    try {
-        const headerRe = /<p[^>]*>\s*[\d,]+\s*<\/p>\s*<img[^>]*alt="([^"]*)"/i
-        const hm = headerRe.exec(html)
-        if (hm) {
-            const alt = hm[1] ?? ''
-            if (/金牌|Gold/i.test(alt)) return 2
-            if (/银牌|Silver/i.test(alt)) return 1
-        }
-        const firstGold = html.search(/金牌会员|Gold Member/i)
-        const firstSilver = html.search(/银牌会员|Silver Member/i)
-        if (firstGold >= 0 && (firstSilver < 0 || firstGold < firstSilver)) return 2
-        if (firstSilver >= 0) return 1
-        return null
-    } catch {
-        return null
-    }
-}
+test('payload balance takes priority over HTML fallback', () => {
+    const result = parser.snapshotPage(
+        '<p>999</p><img alt="金牌会员">' +
+            flight({ availablePoints: 123, level: 1, pointsProgress: 1, pointsRemaining: 3 })
+    )
+    assert.equal(result.account.availablePoints, 123)
+    assert.equal(result.account.level, 1)
+})
 
-interface TestCase {
-    name: string
-    html: string
-    expectedPoints: number | null
-    expectedLevel: number | null
-}
+test('page offers preserve backend type, reject invalid hashes and recognise point progress', () => {
+    const result = parser.snapshotPage(
+        flight([
+            { offerId: 'quiz', promotionType: 'quiz', hash: 'signed', points: 10 },
+            { offerId: 'nohash', hash: '$undefined', points: 10 },
+            { offerId: 'done', hash: 'signed', pointProgressMax: 10, pointProgress: 10 },
+            { offerId: 'disabled', hash: 'signed', isDisabled: true }
+        ])
+    )
+    assert.equal(result.offers.find(o => o.offerId === 'quiz')?.promotionType, 'quiz')
+    assert.equal(result.offers.find(o => o.offerId === 'nohash')?.reportable, false)
+    assert.equal(result.offers.find(o => o.offerId === 'done')?.isCompleted, true)
+    assert.equal(result.offers.find(o => o.offerId === 'disabled')?.reportable, false)
+})
 
-const testCases: TestCase[] = [
-    // 正常情况
-    { name: '正常银牌', html: '<div><p>1,225</p><img alt="银牌会员"></div>', expectedPoints: 1225, expectedLevel: 1 },
-    { name: '正常金牌', html: '<div><p>5,000</p><img alt="金牌会员"></div>', expectedPoints: 5000, expectedLevel: 2 },
-    { name: '英文银牌', html: '<div><p>999</p><img alt="Silver Member"></div>', expectedPoints: 999, expectedLevel: 1 },
-    { name: '英文金牌', html: '<div><p>10,000</p><img alt="Gold Member"></div>', expectedPoints: 10000, expectedLevel: 2 },
-    
-    // 边界情况
-    { name: '0分边界', html: '<div><p>0</p><img alt="银牌会员"></div>', expectedPoints: 0, expectedLevel: 1 },
-    { name: '千位分隔符', html: '<div><p>12,345</p><img alt="银牌会员"></div>', expectedPoints: 12345, expectedLevel: 1 },
-    { name: '大额积分', html: '<div><p>1,234,567</p><img alt="金牌会员"></div>', expectedPoints: 1234567, expectedLevel: 2 },
-    
-    // 抗误识别
-    { name: '活动奖励无会员标识', html: '<div><p>50</p><span>完成任务+50</span></div>', expectedPoints: null, expectedLevel: null },
-    { name: '任务进度数字', html: '<div><p>30</p><p>100</p></div><span>每日任务</span>', expectedPoints: null, expectedLevel: null },
-    
-    // 缺失数据
-    { name: '无会员等级', html: '<div><p>1,225</p></div>', expectedPoints: null, expectedLevel: null },
-    { name: '空页面', html: '<html><body></body></html>', expectedPoints: null, expectedLevel: null },
-    { name: '有等级无积分', html: '<div><span>银牌会员</span></div>', expectedPoints: null, expectedLevel: 1 },
-    
-    // 真实页面结构（2026-10-16 实际捕获）
-    {
-        name: '真实移动端结构',
-        html: '<div class="flex items-center gap-2"><p>1,225</p><img alt="银牌会员" fetchpriority="high" decoding="async" loading="lazy"></div>',
-        expectedPoints: 1225,
-        expectedLevel: 1
-    },
-    // 混合场景：头部是银牌，页面其他位置有金牌推广文案
-    {
-        name: '银牌头部+金牌推广文案',
-        html: '<div><p>1,225</p><img alt="银牌会员"></div><div>升级到金牌会员享受更多权益</div>',
-        expectedPoints: 1225,
-        expectedLevel: 1
-    },
-]
+test('quest child IDs need not contain pcchild and keep their activity type', () => {
+    const result = parser.snapshotQuestPage(
+        flight({ offerId: 'new_child_format', hash: 'signed', activityType: 714, isCompleted: false })
+    )
+    assert.equal(result[0]?.offerId, 'new_child_format')
+    assert.equal(result[0]?.activityType, 714)
+})
 
-let passed = 0
-let failed = 0
+test('visible scored cards survive missing Flight metadata and are deduplicated by destination', () => {
+    const html = '<a href="https://www.bing.com/search?q=weather&amp;form=ABC" data-offer-id="visible">天气 +10积分</a>'
+    assert.equal(parser.snapshotPage(html).offers[0]?.offerId, 'visible')
+    const same = flight({
+        offerId: 'json-id',
+        hash: 'signed',
+        points: 10,
+        destination: 'https://www.bing.com/search?q=weather'
+    })
+    assert.equal(parser.snapshotPage(html + same).offers.length, 1)
+    assert.equal(parser.snapshotPage('<a href="/redeem">1,225 积分</a>').offers.length, 0)
+})
 
-console.log('=== 移动端解析单元测试 ===\n')
-
-for (const tc of testCases) {
-    const points = extractMobilePointsFromHtml(tc.html)
-    const level = extractMobileLevelFromHtml(tc.html)
-    const pointsOk = points === tc.expectedPoints
-    const levelOk = level === tc.expectedLevel
-    const ok = pointsOk && levelOk
-    
-    if (ok) {
-        passed++
-        console.log(`✓ ${tc.name}`)
-    } else {
-        failed++
-        console.log(`✗ ${tc.name}`)
-        console.log(`  积分: 得到 ${points}, 期望 ${tc.expectedPoints}`)
-        console.log(`  等级: 得到 ${level}, 期望 ${tc.expectedLevel}`)
-    }
-}
-
-console.log(`\n=== 结果: ${passed} 通过, ${failed} 失败, 共 ${testCases.length} 项 ===`)
-
-// 关键断言（退出码）
-const critical = [
-    extractMobilePointsFromHtml('<div><p>0</p><img alt="银牌会员"></div>') === 0,
-    extractMobilePointsFromHtml('<div><p>50</p><span>任务</span></div>') === null,
-]
-if (failed > 0 || !critical.every(Boolean)) {
-    console.log('\n测试失败')
-    process.exit(1)
-} else {
-    console.log('\n所有测试通过')
-    process.exit(0)
-}
+test('page snapshot preserves absent versus explicitly empty search quota fields', () => {
+    const result = parser.snapshotPage(
+        flight({ counters: { pcSearch: [], MobileSearch: [{ pointProgress: 3, pointProgressMax: 30 }] } })
+    )
+    assert.deepEqual(result.searchCounters?.pcSearch, [])
+    assert.equal(result.searchCounters?.mobileSearch?.[0]?.pointProgressMax, 30)
+    assert.equal(parser.snapshotPage('<html></html>').searchCounters?.pcSearch, undefined)
+})
