@@ -4,7 +4,7 @@ import type { PageSnapshot } from '../../../browser/ReactFunc'
 import { SearchProgress } from '../search/SearchProgress'
 import { PromotionActivityRunner } from './PromotionActivityRunner'
 import { TaskLedger } from './TaskLedger'
-import { discoverTasks, promotionComplete, taskDate, type DiscoveredTask } from './TaskDiscovery'
+import { discoverTasks, isBonusSearchCard, promotionComplete, taskDate, type DiscoveredTask } from './TaskDiscovery'
 import { observeAppTasks } from './AppTaskAudit'
 import type { AppDashboardData } from '../../../interface/AppDashBoardData'
 
@@ -190,7 +190,11 @@ export class TaskCoverage {
         }
     }
 
-    async run(group: 'dailySet' | 'more' | 'all', seed?: DashboardData): Promise<void> {
+    async run(
+        group: 'dailySet' | 'more' | 'all',
+        seed?: DashboardData,
+        options: { cardsOnly?: boolean } = {}
+    ): Promise<void> {
         this.data ??= seed ?? null
         const passes = this.bot.config.taskCoverage?.maxPasses ?? 3
         for (let pass = 0; pass < passes; pass++) {
@@ -201,6 +205,12 @@ export class TaskCoverage {
                 if (task.category === 'punchCards') return false
                 if (group === 'dailySet' && task.category !== 'dailySet') return false
                 if (group === 'more' && task.category === 'dailySet') return false
+                // Theme searches are quick card activities. Ordinary bonus searches
+                // use the long search loop and must wait until both platforms' cards ran.
+                if (options.cardsOnly && isBonusSearchCard(task.promotion)) {
+                    this.ledger.set(record.id, { reason: '普通奖励搜索安排在卡片优先阶段之后执行' })
+                    return false
+                }
                 // Unsupported/disabled tasks remain visible, but are not retried without a state change.
                 return record.status !== 'unsupported' && record.status !== 'disabled' && record.attempts < passes
             })

@@ -1,6 +1,6 @@
 import { BaseActivity } from '../BaseActivity'
 import type { BasePromotion } from '../../../interface/DashboardData'
-import { isBareSearchCard, isLockedPromotion, isSearchCard, promotionComplete } from './TaskDiscovery'
+import { isBonusSearchCard, isLockedPromotion, isSearchCard, promotionComplete } from './TaskDiscovery'
 import { LegacyQuiz } from './LegacyQuiz'
 import { ActivateSearchPerk } from '../api/ActivateSearchPerk'
 import { BrowserCard, safeCardDestination } from './BrowserCard'
@@ -50,7 +50,7 @@ export class PromotionActivityRunner extends BaseActivity {
         )
 
         const isSearchOnBing = isSearchCard(promotion)
-        const isBonusSearch = !isSearchOnBing && isBareSearchCard(promotion) && Number(promotion.pointProgressMax) > 0
+        const isBonusSearch = isBonusSearchCard(promotion)
         const isVisualSearch = /visual.?search/i.test(offerId)
         const isMultiplier =
             /optin[_-]?\d+x|search.?multiplier/i.test(offerId) ||
