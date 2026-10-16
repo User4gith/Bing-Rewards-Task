@@ -107,6 +107,9 @@ async function diagnose(): Promise<DiagnoseResult> {
         browser = await chromium.launch({ headless: true, proxy: { server: PROXY } })
         const context = await browser.newContext({
             storageState,
+            // 与主程序 config.json proxy.ignoreCertificateErrors=true 一致：
+            // 本地 MITM 代理 (127.0.0.1:3129) 使用自签 CA，需信任代理证书
+            ignoreHTTPSErrors: true,
             userAgent:
                 'Mozilla/5.0 (Linux; Android 15; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Mobile Safari/537.36 EdgA/155.0.4283.48',
             viewport: { width: 412, height: 915 },
