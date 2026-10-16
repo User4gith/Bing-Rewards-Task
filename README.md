@@ -280,7 +280,7 @@ docker compose restart          # 重启（不重建）
 | `skipNonPointTasks`         | 跳过无积分奖励的任务                                                                                                                                                                                                      | `true`          | `CONFIG_SKIP_NON_POINT_TASKS`         |
 | `prewarmDesktopLogin`       | 移动端登录后立即完成桌面端登录并保存会话（需要手机批准的账户可把两次批准集中在运行开头），之后桌面阶段直接复用会话                                                                                                        | `false`         | `CONFIG_PREWARM_DESKTOP_LOGIN`        |
 | `accountDelay.min` / `.max` | 下一账户开始前的延迟                                                                                                                                                                                                      | `1min` - `3min` | `CONFIG_ACCOUNT_DELAY_MIN` / `_MAX`   |
-| `searchOnBingLocalQueries`  | ExploreOnBing 活动使用本地词库                                                                                                                                                                                            | `false`         | `CONFIG_SEARCH_ON_BING_LOCAL`         |
+| `searchOnBingLocalQueries`  | 仅使用内置主题词库；为 `false` 时允许远程补充尚未收录的主题                                                                                                                                                                 | `false`         | `CONFIG_SEARCH_ON_BING_LOCAL`         |
 | `globalTimeout`             | 所有操作的超时时间                                                                                                                                                                                                        | `30sec`         | `CONFIG_GLOBAL_TIMEOUT`               |
 
 </details>
@@ -617,6 +617,16 @@ gmya.net 免费档对连续请求有频率限制。解决方法：
 ```
 
 全量模式会在内存中开启所有现有活动 worker、搜索奖励、视觉搜索和 Edge 浏览活动；开启零分前置步骤与已赚取卡片积分领取；搜索目标固定 100%，关闭每日成功文件跳过和并行搜索。实际运行配置以启动日志 `TASK-COVERAGE` 为准，原配置文件不会被覆盖。需要保留原来的模块开关时，将 `taskCoverage.enabled` 设为 `false`。浏览器及日期计算使用 `timeZone`，其他地区请调整 IANA 时区。
+
+执行顺序为：先处理移动端和桌面端当前可执行的 Daily Set、Daily Activities、More Activities、Explore on Bing、签到、推广与多步骤卡片，并领取已赚取的卡片积分；然后执行普通搜索与额外配额搜索，最后执行 Read to earn。Explore on Bing 指定主题搜索保留原有秒级等待，普通搜索和阅读保留各自原有等待设置。普通奖励搜索即使出现在卡片列表中，也不会提前启动长时间搜索循环。
+
+卡片优先阶段会补扫前置任务新解锁的卡片。必须依赖搜索、阅读或后台活动才能解锁的项目，在相应活动结束后补做；未完成、未知或受条件阻断的卡片仍保留在逐项报告中。日志分别标记“卡片优先阶段”和“普通搜索和阅读阶段”，阶段切换不代表所有卡片已成功得分。
+
+Explore on Bing 使用独立的 `src/functions/bing-search-activity-queries.json` 主题词库，包含 69 类主题、2,016 条查询和 179 个标题别名。查询以英文为主，合并了重复主题，保留原有 74 个标题的兼容关系，并补齐 `Learn a new recipe` / `Learn to cook a new recipe` 等名称变化。标题匹配忽略大小写、空格与标点，保留中文字符；匹配成功后在该主题内去重、随机排列查询词，官网确认卡片完成即停止。
+
+新增 20 类预置主题：科技、航天、运动、园艺、语言学习、通勤、单位换算、数学计算、科学、铁路旅行、播客、博物馆、历史、摄影、家庭节能、编程、野生动物、徒步、艺术及兴趣爱好。新增词库主题不代表官网已经提供相应奖励任务；只为官网实际下发、且由现有执行器支持的卡片提供相关检索词。
+
+默认配置也会优先使用内置增强词库。只有未匹配的主题才从远程词库补充；`searchOnBingLocalQueries=true` 时不请求远程词库。远程不可用、返回无效内容或仍未收录的任务，会保留标题及描述查询作为兜底，不会把未知标题匹配到无关主题。
 
 新面板账户可能不再提供旧版主 API。仅有部分备用接口时保持待核验；同时取得 `/earn` 与 `/dashboard` 的完整已认证页面、且解析到任务清单时，可以由页面补全任务来源。某张卡片失败不会阻断其他卡片。后台长时间活动结束后如出现新的可执行项目，会重新建立桌面会话补做。
 

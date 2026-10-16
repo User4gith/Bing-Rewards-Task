@@ -7,7 +7,7 @@ import type { PageSnapshot } from '../browser/ReactFunc'
 import example from '../../config.example.json'
 import { TaskCoverage } from '../functions/activities/rewards/TaskCoverage'
 import { TaskLedger } from '../functions/activities/rewards/TaskLedger'
-import { collectPromotions, taskDate } from '../functions/activities/rewards/TaskDiscovery'
+import { collectPromotions, isBonusSearchCard, taskDate } from '../functions/activities/rewards/TaskDiscovery'
 import { DailySet } from '../functions/activities/rewards/DailySet'
 import { MorePromotions } from '../functions/activities/rewards/MorePromotions'
 import { PunchCards } from '../functions/activities/rewards/PunchCards'
@@ -439,4 +439,34 @@ test('failure in one punchcard child does not skip its siblings', async () => {
     assert.deepEqual(f.executed, ['pcchild_good'])
     assert.equal(f.bot.taskCoverage.ledger.get(good.offerId)?.status, 'complete')
     assert.notEqual(f.bot.taskCoverage.ledger.get(parent.offerId)?.status, 'complete')
+})
+
+test('card-only passes execute Explore on Bing but defer quota-based bonus searches without spending attempts', async () => {
+    const bonus = promotion('ordinary-bonus', { destinationUrl: 'https://www.bing.com/' })
+    const theme = promotion('ExploreOnBing_recipe', { destinationUrl: 'https://www.bing.com/' })
+    const f = fixture({ morePromotions: [bonus, theme, promotion('quick-card')] })
+    let bonusRuns = 0
+    f.bot.activities.doBonusSearches = async () => {
+        bonusRuns++
+        bonus.complete = true
+        bonus.pointProgress = bonus.pointProgressMax
+        return 10
+    }
+    await new MorePromotions(f.bot).run(f.data)
+    assert.equal(bonusRuns, 0)
+    assert.deepEqual(new Set(f.executed), new Set([theme.offerId, 'quick-card']))
+    assert.equal(f.bot.taskCoverage.ledger.get(bonus.offerId)?.attempts, 0)
+    assert.equal(f.bot.taskCoverage.ledger.get(bonus.offerId)?.status, 'pending')
+    await f.bot.taskCoverage.run('all')
+    assert.equal(bonusRuns, 1)
+    assert.equal(f.bot.taskCoverage.ledger.get(bonus.offerId)?.status, 'complete')
+})
+
+test('quick theme, visual and multiplier cards are not mistaken for long bonus search loops', () => {
+    const bare = { destinationUrl: 'https://www.bing.com/' }
+    assert.equal(isBonusSearchCard(promotion('ordinary-bonus', bare)), true)
+    for (const id of ['ExploreOnBing_recipe', 'visual-search', 'optin_2x', 'search_multiplier']) {
+        assert.equal(isBonusSearchCard(promotion(id, bare)), false, id)
+    }
+    assert.equal(isBonusSearchCard(promotion('perk', { ...bare, attributes: { searchMultiplier: 2 } })), false)
 })

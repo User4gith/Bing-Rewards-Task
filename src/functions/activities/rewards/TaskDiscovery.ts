@@ -202,3 +202,13 @@ export function isBareSearchCard(promotion: BasePromotion): boolean {
         return false
     }
 }
+
+export function isBonusSearchCard(promotion: BasePromotion): boolean {
+    return (
+        !isSearchCard(promotion) &&
+        isBareSearchCard(promotion) &&
+        Number(promotion.pointProgressMax) > 0 &&
+        !/visual.?search|optin[_-]?\d+x|search.?multiplier/i.test(promotion.offerId) &&
+        !(promotion.attributes as Record<string, unknown> | null)?.searchMultiplier
+    )
+}

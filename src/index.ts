@@ -953,167 +953,121 @@ export class MicrosoftRewardsBot {
                         })
                 }
 
-                if (fullApi) {
-                    if (this.config.ensureStreakProtection) {
-                        await this.activities.doEnsureStreakProtection()
-                    }
-                    if (this.config.workers.doPunchCards) {
-                        await this.activities.doPunchCardsMobile(data)
-                        await this.gapBetweenWorkers()
-                    }
-                    if (this.config.workers.doActivateSearchPerk) {
-                        await this.activities.doActivateSearchPerk(data)
-                        await this.gapBetweenWorkers()
-                    }
+                this.logger.info('main', 'FLOW', '卡片优先阶段：先处理每日活动、Explore on Bing、更多活动和多步骤卡片')
+                if (this.config.ensureStreakProtection) {
+                    await this.activities.doEnsureStreakProtection()
+                }
+                if (this.config.workers.doDailySet) {
+                    await this.activities.doDailySet(data)
+                    await this.gapBetweenWorkers()
+                }
+                if (this.config.workers.doActivateSearchPerk) {
+                    await this.activities.doActivateSearchPerk(data)
+                    await this.gapBetweenWorkers()
+                }
+                if (this.config.workers.doMorePromotions) {
+                    await this.activities.doMorePromotions(data)
+                    await this.gapBetweenWorkers()
+                }
+                if (appAvailable && this.config.workers.doDailyCheckIn) {
+                    await this.activities.doDailyCheckIn()
+                    await this.gapBetweenWorkers()
+                }
+                if (appAvailable && this.config.workers.doAppPromotions && appData) {
+                    await this.activities.doAppPromotions(appData)
+                    await this.gapBetweenWorkers()
+                }
+                if (this.config.workers.doPunchCards) {
+                    await this.activities.doPunchCardsMobile(data)
+                    await this.gapBetweenWorkers()
+                }
+                await this.taskCoverage.run('all', undefined, { cardsOnly: true })
 
-                    const plan = await this.searchManager.getSearchPoints()
-                    const doMobileSearch = plan.doMobile
-                    const doDesktopSearch = plan.doDesktop
-                    const desktopBrowserNeeded = this.config.workers.doPunchCards || doVisualSearch
+                const desktopBrowserNeeded =
+                    this.config.workers.doPunchCards ||
+                    doVisualSearch ||
+                    (this.config.workers.doDesktopSearch && !apiSearch) ||
+                    (this.config.taskCoverage?.enabled && this.taskCoverage.needsBrowserRetry())
+                let desktopSearchPlanned = false
+                if (desktopBrowserNeeded) {
+                    await executionContext.run({ isMobile: false, account }, async () => {
+                        desktopSession = await this.createDesktopSession(account)
+                        await this.taskCoverage.run('all', undefined, { cardsOnly: true })
+                        if (this.config.workers.doPunchCards) await this.activities.doPunchCardsDesktop()
+                        if (doVisualSearch)
+                            await this.activities.doVisualSearch(await this.browser.func.getDashboardData())
+                        await this.taskCoverage.run('all', undefined, { cardsOnly: true })
+                        // A mobile response may omit the desktop quota. Remember the
+                        // fresh desktop plan before restoring the mobile context.
+                        desktopSearchPlanned = (await this.searchManager.getSearchPoints()).doDesktop
+                    })
+                    await closeDesktopSession()
+                }
+                // Desktop actions can unlock more mobile cards. Complete that pass
+                // and claim already-earned card rewards before any long search/read loop.
+                await this.taskCoverage.run('all', undefined, { cardsOnly: true })
+                if (this.config.workers.doClaimBonusPoints) await this.activities.doClaimBonusPoints()
 
-                    if (doDesktopSearch && !desktopBrowserNeeded) {
-                        this.cookies.desktop = [...this.cookies.mobile]
-                        this.fingerprintDesktop = await this.browserFactory.generateFingerprint(false)
+                this.logger.info(
+                    'main',
+                    'FLOW',
+                    '卡片优先阶段检查结束；进入普通搜索和阅读阶段，依赖这些活动解锁的卡片将在结束后补扫核验'
+                )
+                const plan = await this.searchManager.getSearchPoints()
+                const doMobileSearch = plan.doMobile
+                const doDesktopSearch = plan.doDesktop || desktopSearchPlanned
+                if (apiSearch && doDesktopSearch && !this.cookies.desktop.length) {
+                    this.cookies.desktop = [...this.cookies.mobile]
+                    this.fingerprintDesktop = await this.browserFactory.generateFingerprint(false)
+                }
+
+                if (parallel && !apiSearch && doMobileSearch && doDesktopSearch) {
+                    await executionContext.run({ isMobile: false, account }, async () => {
+                        desktopSession = await this.createDesktopSession(account)
+                    })
+                    const mobileWork = async (): Promise<[number, number]> => {
+                        try {
+                            const searchPoints = await this.searchManager.searchMobile(account)
+                            const extraPoints = doBonus ? await this.searchManager.bonusMobile(account) : 0
+                            return [searchPoints, extraPoints]
+                        } finally {
+                            await closeMobileSession()
+                        }
                     }
+                    const desktopWork = async (): Promise<number> => {
+                        try {
+                            return await executionContext.run({ isMobile: false, account }, async () => {
+                                const desktopPlan = await this.searchManager.getSearchPoints()
+                                return desktopPlan.doDesktop ? this.searchManager.searchDesktop(account) : 0
+                            })
+                        } finally {
+                            await closeDesktopSession()
+                        }
+                    }
+                    ;[[mobilePoints, bonusPoints], desktopPoints] = await Promise.all([mobileWork(), desktopWork()])
+                } else {
+                    if (apiSearch) await closeMobileSession()
+                    if (doMobileSearch) mobilePoints = await this.searchManager.searchMobile(account)
+                    if (doBonus) bonusPoints = await this.searchManager.bonusMobile(account)
 
-                    if (desktopBrowserNeeded) {
+                    if (!apiSearch) await this.taskCoverage.run('all')
+                    if (!doMobileSearch && (await this.searchManager.getSearchPoints()).doMobile) {
+                        mobilePoints = await this.searchManager.searchMobile(account)
+                    }
+                    if (!apiSearch) await closeMobileSession()
+
+                    if (!apiSearch && this.config.workers.doDesktopSearch) {
                         await executionContext.run({ isMobile: false, account }, async () => {
                             desktopSession = await this.createDesktopSession(account)
-                            if (this.config.workers.doPunchCards) await this.activities.doPunchCardsDesktop()
-                            if (doVisualSearch) await this.activities.doVisualSearch(data)
+                            const desktopPlan = await this.searchManager.getSearchPoints()
+                            if (desktopPlan.doDesktop) desktopPoints = await this.searchManager.searchDesktop(account)
                             await this.taskCoverage.run('all')
+                            if (this.config.workers.doPunchCards) await this.activities.doPunchCardsDesktop()
                         })
                         await closeDesktopSession()
                     }
-
-                    if (this.config.workers.doDailySet) {
-                        await this.activities.doDailySet(data)
-                        await this.gapBetweenWorkers()
-                    }
-                    if (this.config.workers.doMorePromotions) {
-                        await this.activities.doMorePromotions(data)
-                        await this.gapBetweenWorkers()
-                    }
-                    if (appAvailable && this.config.workers.doDailyCheckIn) {
-                        await this.activities.doDailyCheckIn()
-                        await this.gapBetweenWorkers()
-                    }
-                    if (appAvailable && this.config.workers.doAppPromotions && appData) {
-                        await this.activities.doAppPromotions(appData)
-                        await this.gapBetweenWorkers()
-                    }
-                    if (appAvailable && this.config.workers.doReadToEarn) {
-                        await this.activities.doReadToEarn()
-                        await this.gapBetweenWorkers()
-                    }
-
-                    const refreshedPlan = await this.searchManager.getSearchPoints()
-                    if (doMobileSearch || refreshedPlan.doMobile)
-                        mobilePoints = await this.searchManager.searchMobile(account)
-                    if (doBonus) bonusPoints = await this.searchManager.bonusMobile(account)
-                    if (doDesktopSearch || refreshedPlan.doDesktop)
+                    if (apiSearch && ((await this.searchManager.getSearchPoints()).doDesktop || desktopSearchPlanned)) {
                         desktopPoints = await this.searchManager.searchDesktop(account)
-                } else {
-                    if (this.config.ensureStreakProtection) {
-                        await this.activities.doEnsureStreakProtection()
-                    }
-                    if (this.config.workers.doDailySet) {
-                        await this.activities.doDailySet(data)
-                        await this.gapBetweenWorkers()
-                    }
-                    if (this.config.workers.doActivateSearchPerk) {
-                        await this.activities.doActivateSearchPerk(data)
-                        await this.gapBetweenWorkers()
-                    }
-                    if (this.config.workers.doMorePromotions) {
-                        await this.activities.doMorePromotions(data)
-                        await this.gapBetweenWorkers()
-                    }
-                    if (appAvailable && this.config.workers.doDailyCheckIn) {
-                        await this.activities.doDailyCheckIn()
-                        await this.gapBetweenWorkers()
-                    }
-                    if (appAvailable && this.config.workers.doAppPromotions && appData) {
-                        await this.activities.doAppPromotions(appData)
-                        await this.gapBetweenWorkers()
-                    }
-                    if (appAvailable && this.config.workers.doReadToEarn) {
-                        await this.activities.doReadToEarn()
-                        await this.gapBetweenWorkers()
-                    }
-                    if (this.config.workers.doPunchCards) {
-                        await this.activities.doPunchCardsMobile(data)
-                        await this.gapBetweenWorkers()
-                    }
-
-                    const plan = await this.searchManager.getSearchPoints()
-                    const doMobileSearch = plan.doMobile
-                    const doDesktopSearch = plan.doDesktop
-
-                    const desktopBrowserNeeded =
-                        this.config.workers.doPunchCards || doVisualSearch || (doDesktopSearch && !apiSearch)
-
-                    if (apiSearch && doDesktopSearch && !desktopBrowserNeeded) {
-                        this.cookies.desktop = [...this.cookies.mobile]
-                        this.fingerprintDesktop = await this.browserFactory.generateFingerprint(false)
-                    }
-
-                    if (parallel && !apiSearch && doMobileSearch && doDesktopSearch) {
-                        await executionContext.run({ isMobile: false, account }, async () => {
-                            desktopSession = await this.createDesktopSession(account)
-                            if (this.config.workers.doPunchCards) await this.activities.doPunchCardsDesktop()
-                            if (doVisualSearch) await this.activities.doVisualSearch(data)
-                        })
-
-                        const mobileWork = async (): Promise<[number, number]> => {
-                            try {
-                                const searchPoints = await this.searchManager.searchMobile(account)
-                                const extraPoints = doBonus ? await this.searchManager.bonusMobile(account) : 0
-                                return [searchPoints, extraPoints]
-                            } finally {
-                                await closeMobileSession()
-                            }
-                        }
-                        const desktopWork = async (): Promise<number> => {
-                            try {
-                                return await this.searchManager.searchDesktop(account)
-                            } finally {
-                                await closeDesktopSession()
-                            }
-                        }
-
-                        ;[[mobilePoints, bonusPoints], desktopPoints] = await Promise.all([mobileWork(), desktopWork()])
-                    } else {
-                        if (apiSearch) await closeMobileSession()
-
-                        if (doMobileSearch) mobilePoints = await this.searchManager.searchMobile(account)
-                        if (doBonus) bonusPoints = await this.searchManager.bonusMobile(account)
-
-                        if (!apiSearch) await this.taskCoverage.run('all')
-                        if (!doMobileSearch && (await this.searchManager.getSearchPoints()).doMobile) {
-                            mobilePoints = await this.searchManager.searchMobile(account)
-                        }
-                        if (!apiSearch) await closeMobileSession()
-
-                        if (desktopBrowserNeeded) {
-                            await executionContext.run({ isMobile: false, account }, async () => {
-                                desktopSession = await this.createDesktopSession(account)
-
-                                if (this.config.workers.doPunchCards) await this.activities.doPunchCardsDesktop()
-                                if (doVisualSearch) await this.activities.doVisualSearch(data)
-                                const desktopPlan = await this.searchManager.getSearchPoints()
-                                if (desktopPlan.doDesktop && !apiSearch) {
-                                    desktopPoints = await this.searchManager.searchDesktop(account)
-                                }
-                                await this.taskCoverage.run('all')
-                                if (this.config.workers.doPunchCards) await this.activities.doPunchCardsDesktop()
-                            })
-                            await closeDesktopSession()
-                        }
-
-                        if (apiSearch && (await this.searchManager.getSearchPoints()).doDesktop) {
-                            desktopPoints = await this.searchManager.searchDesktop(account)
-                        }
                     }
                 }
 
@@ -1124,6 +1078,11 @@ export class MicrosoftRewardsBot {
                         mobilePoints + desktopPoints + bonusPoints
                     }`
                 )
+
+                if (appAvailable && this.config.workers.doReadToEarn) {
+                    await this.activities.doReadToEarn()
+                    await this.gapBetweenWorkers()
+                }
 
                 if (this.config.workers.doClaimBonusPoints) {
                     await this.gapBetweenWorkers()
