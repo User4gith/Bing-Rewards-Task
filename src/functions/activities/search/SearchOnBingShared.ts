@@ -4,6 +4,7 @@ import path from 'path'
 import { URLs } from '../../../constants/urls'
 import type { BasePromotion, Dashboard } from '../../../interface/DashboardData'
 import type { MicrosoftRewardsBot } from '../../../index'
+import { findPromotion } from '../rewards/TaskDiscovery'
 
 interface ActivityQueries {
     title: string
@@ -15,22 +16,14 @@ export async function activateSearchOnBing(bot: MicrosoftRewardsBot, promotion: 
     const actionId = bot.nextActions.reportActivity
 
     if (!actionId) {
-        bot.logger.warn(
-            bot.isMobile,
-            'SEARCH-ON-BING-ACTIVATE',
-            `跳过 ${offerId}: 未在 bundle 中发现 "reportActivity"`
-        )
+        bot.logger.warn(bot.isMobile, 'SEARCH-ON-BING-ACTIVATE', `跳过 ${offerId}: 未在 bundle 中发现 "reportActivity"`)
         return false
     }
 
     const live = await bot.browser.func.ensureOffer(offerId)
     const hash = live?.hash ?? promotion.hash ?? null
     if (!hash) {
-        bot.logger.warn(
-            bot.isMobile,
-            'SEARCH-ON-BING-ACTIVATE',
-            `跳过 ${offerId}: 激活活动无可用 hash`
-        )
+        bot.logger.warn(bot.isMobile, 'SEARCH-ON-BING-ACTIVATE', `跳过 ${offerId}: 激活活动无可用 hash`)
         return false
     }
 
@@ -62,13 +55,7 @@ export async function activateSearchOnBing(bot: MicrosoftRewardsBot, promotion: 
 }
 
 export function findSearchOnBingOffer(dashboard: Dashboard, offerId: string): BasePromotion | undefined {
-    const offers = [
-        ...Object.values(dashboard.dailySetPromotions ?? {}).flat(),
-        ...(dashboard.morePromotions ?? []),
-        ...(dashboard.promotionalItems ?? []),
-        ...(dashboard.promotionalItem ? [dashboard.promotionalItem] : [])
-    ]
-    return offers.find(offer => offer.offerId === offerId)
+    return findPromotion(dashboard, offerId)
 }
 
 export async function getSearchOnBingQueries(bot: MicrosoftRewardsBot, promotion: BasePromotion): Promise<string[]> {

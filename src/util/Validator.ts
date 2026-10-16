@@ -69,6 +69,23 @@ const HumanizeSchema = z.object({
     readToEarnArticles: HumanizeRangeSchema.optional()
 })
 
+const TaskCoverageSchema = z.object({
+    timeZone: z
+        .string()
+        .refine(value => {
+            try {
+                new Intl.DateTimeFormat('en', { timeZone: value })
+                return true
+            } catch {
+                return false
+            }
+        }, 'Expected an IANA time zone')
+        .default('Asia/Shanghai'),
+    enabled: z.boolean().default(true),
+    maxPasses: z.number().int().min(1).max(5).default(3),
+    verificationAttempts: z.number().int().min(1).max(5).default(3)
+})
+
 const AccountLanguageSchema = z
     .string()
     .trim()
@@ -201,7 +218,13 @@ export const ConfigSchema = z.object({
     }),
     consoleLogFilter: LogFilterSchema,
     webhook: WebhookSchema,
-    humanize: HumanizeSchema.optional()
+    humanize: HumanizeSchema.optional(),
+    taskCoverage: TaskCoverageSchema.default({
+        enabled: true,
+        maxPasses: 3,
+        verificationAttempts: 3,
+        timeZone: 'Asia/Shanghai'
+    })
 })
 
 const AccountProxySchema = z

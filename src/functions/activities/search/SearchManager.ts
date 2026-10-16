@@ -18,14 +18,27 @@ export class SearchManager {
     }
 
     async getSearchPoints(): Promise<SearchPlan> {
-        const counters = await this.progress.getCounters()
+        let counters
+        try {
+            counters = await this.progress.getCounters()
+        } catch (error) {
+            const reason = `无法读取搜索配额：${error instanceof Error ? error.message : String(error)}`
+            for (const platform of ['mobile', 'desktop'])
+                this.bot.taskCoverage.ledger.set(`search:${platform}`, {
+                    category: 'search',
+                    status: 'unverified',
+                    reason
+                })
+            this.bot.logger.warn('main', 'SEARCH-MANAGER', reason)
+            return { doMobile: false, doDesktop: false, mobileMissing: 0, desktopMissing: 0 }
+        }
         const quotas = this.progress.calculateQuotas(counters)
         const mobileMissing = quotas.mobile.remaining
         const desktopQuota = this.combineQuotas(quotas.desktop, quotas.edge)
         const desktopMissing = desktopQuota.remaining
 
-        const doMobile = this.bot.config.workers.doMobileSearch && mobileMissing > 0
-        const doDesktop = this.bot.config.workers.doDesktopSearch && desktopMissing > 0
+        const doMobile = this.bot.config.workers.doMobileSearch && quotas.mobile.known && mobileMissing > 0
+        const doDesktop = this.bot.config.workers.doDesktopSearch && desktopQuota.known && desktopMissing > 0
 
         this.bot.logger.info(
             'main',
@@ -41,16 +54,19 @@ export class SearchManager {
     private combineQuotas(...quotas: SearchQuota[]): SearchQuota {
         return quotas.reduce(
             (total, quota) => ({
+                known: total.known && quota.known,
                 earned: total.earned + quota.earned,
                 max: total.max + quota.max,
                 remaining: total.remaining + quota.remaining
             }),
-            { earned: 0, max: 0, remaining: 0 }
+            { known: true, earned: 0, max: 0, remaining: 0 }
         )
     }
 
     private describeQuota(enabled: boolean, quota: SearchQuota): string {
+        if (!quota.known) return 'unknown (配额字段缺失，未核验)'
         if (!enabled) return `skip (disabled, ${quota.earned}/${quota.max})`
+        if (quota.max <= 0) return 'unavailable (官网未提供配额)'
         if (quota.remaining <= 0) return `skip (complete, ${quota.earned}/${quota.max})`
         return `run (${quota.earned}/${quota.max}, missing ${quota.remaining})`
     }
@@ -71,6 +87,10 @@ export class SearchManager {
             try {
                 return await this.bot.activities.doSearch(page, isMobile)
             } catch (error) {
+                this.bot.taskCoverage.ledger.set(`search:${isMobile ? 'mobile' : 'desktop'}`, {
+                    status: 'failed',
+                    reason: error instanceof Error ? error.message : String(error)
+                })
                 this.bot.logger.error(
                     'main',
                     'SEARCH-MANAGER',

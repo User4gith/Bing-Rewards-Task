@@ -1,4 +1,5 @@
 export interface DashboardData {
+    source?: 'primary' | 'flyout' | 'page'
     dashboard: Dashboard
     status: Status
     catalog: Catalog

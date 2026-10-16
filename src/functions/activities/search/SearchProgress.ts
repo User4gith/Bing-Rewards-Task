@@ -3,6 +3,7 @@ import type { Counters, DashboardImpression } from '../../../interface/Dashboard
 import type { MissingSearchPoints } from '../../../interface/Points'
 
 export interface SearchQuota {
+    known: boolean
     earned: number
     max: number
     remaining: number
@@ -28,6 +29,9 @@ export class SearchProgress {
 
     public calculateMissing(counters: Counters, isMobile: boolean): MissingSearchPoints {
         const quotas = this.calculateQuotas(counters)
+        if (isMobile ? !quotas.mobile.known : !quotas.desktop.known || !quotas.edge.known) {
+            throw new Error(`${isMobile ? '移动端' : '桌面端'}搜索配额缺失或无效，不能判定完成`)
+        }
         const mobilePoints = quotas.mobile.remaining
         const desktopPoints = quotas.desktop.remaining
         const edgePoints = quotas.edge.remaining
@@ -48,15 +52,21 @@ export class SearchProgress {
             : pcCounters
 
         return {
-            mobile: this.summarize(counters.mobileSearch ?? []),
-            desktop: this.summarize(desktopCounters),
+            mobile: this.summarize(counters.mobileSearch),
+            desktop: this.summarize(Array.isArray(counters.pcSearch) ? desktopCounters : undefined),
             edge: this.summarize(explicitEdgeCounters)
         }
     }
 
-    private summarize(counters: DashboardImpression[]): SearchQuota {
+    private summarize(counters: DashboardImpression[] | undefined): SearchQuota {
+        if (!Array.isArray(counters)) return { known: false, earned: 0, max: 0, remaining: 0 }
         return counters.reduce<SearchQuota>(
             (quota, counter) => {
+                quota.known &&=
+                    counter.pointProgressMax != null &&
+                    counter.pointProgress != null &&
+                    Number.isFinite(Number(counter.pointProgressMax)) &&
+                    Number.isFinite(Number(counter.pointProgress))
                 const max = Math.max(0, Number(counter.pointProgressMax) || 0)
                 const earned = Math.min(max, Math.max(0, Number(counter.pointProgress) || 0))
                 quota.earned += earned
@@ -64,7 +74,7 @@ export class SearchProgress {
                 quota.remaining += max - earned
                 return quota
             },
-            { earned: 0, max: 0, remaining: 0 }
+            { known: true, earned: 0, max: 0, remaining: 0 }
         )
     }
 

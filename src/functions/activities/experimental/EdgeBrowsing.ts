@@ -59,8 +59,17 @@ interface ActivationTarget extends ParsedOffer {
 
 export class EdgeBrowsing extends BaseActivity {
     public async run(data: DashboardData, signal?: AbortSignal): Promise<void> {
+        const ledger = this.bot.taskCoverage.ledger
+        const id = 'activity:edgeBrowsing'
+        ledger.set(id, {
+            title: 'Edge 浏览积分活动',
+            category: 'edgeBrowsing',
+            status: 'pending',
+            reason: '等待查询官网活动状态'
+        })
         const accessToken = this.bot.accessToken
         if (!accessToken) {
+            ledger.set(id, { status: 'unverified', reason: '移动应用访问令牌不可用，不能确认 Edge 浏览积分' })
             this.bot.logger.warn(this.bot.isMobile, LOG_TAG, '跳过：移动应用访问令牌不可用')
             return
         }
@@ -74,25 +83,29 @@ export class EdgeBrowsing extends BaseActivity {
                 if (signal?.aborted) return
 
                 if (activation === 'absent') {
-                    this.bot.logger.info(
-                        this.bot.isMobile,
-                        LOG_TAG,
-                        '该账户无法使用 Edge 浏览连击（Browsing Streak）'
-                    )
+                    ledger.set(id, { status: 'unavailable', reason: '官网当前未提供 Edge 浏览连击活动' })
+                    this.bot.logger.info(this.bot.isMobile, LOG_TAG, '该账户无法使用 Edge 浏览连击（Browsing Streak）')
                     return
                 }
 
-                if (activation === 'failed') return
+                if (activation === 'failed') {
+                    ledger.set(id, { status: 'failed', reason: 'Edge 浏览活动激活失败' })
+                    return
+                }
 
                 profile = await this.getEdgeProfile(accessToken)
                 if (signal?.aborted) return
             }
 
             const settings = this.resolveSettings(profile)
-            if (!settings) return
+            if (!settings) {
+                ledger.set(id, { status: 'unverified', reason: '未取得 Edge 浏览活动的有效执行配置' })
+                return
+            }
 
             const complete = settings.promotion.attributes['complete']?.toLowerCase() === 'true'
             if (complete) {
+                ledger.set(id, { status: 'complete', reason: '官网已确认 Edge 浏览活动完成' })
                 this.bot.logger.info(this.bot.isMobile, LOG_TAG, 'Edge 浏览连击（Browsing Streak）已完成')
                 return
             }
@@ -203,6 +216,10 @@ export class EdgeBrowsing extends BaseActivity {
             }
 
             const finished = progress.snapshot(reportsProcessed)
+            ledger.set(id, {
+                status: serverComplete ? 'complete' : 'unverified',
+                reason: serverComplete ? '已刷新 Edge 官网配置核验活动完成' : 'Edge 浏览上报结束，但官网尚未确认完成'
+            })
             const summary =
                 `后台 Edge 浏览活动结束 | reports=${reportsProcessed}` +
                 ` | reportsCompleted=${reportsProcessed}/${reportCount}` +
@@ -220,6 +237,7 @@ export class EdgeBrowsing extends BaseActivity {
                 this.bot.logger.info(this.bot.isMobile, LOG_TAG, summary, 'green')
             }
         } catch (error) {
+            ledger.set(id, { status: 'failed', reason: error instanceof Error ? error.message : String(error) })
             if (signal?.aborted) {
                 this.bot.logger.debug(this.bot.isMobile, LOG_TAG, '后台活动已取消')
                 return
@@ -228,9 +246,7 @@ export class EdgeBrowsing extends BaseActivity {
             this.bot.logger.error(
                 this.bot.isMobile,
                 LOG_TAG,
-                `后台 Edge 浏览活动失败 | message=${
-                    error instanceof Error ? error.message : String(error)
-                }`
+                `后台 Edge 浏览活动失败 | message=${error instanceof Error ? error.message : String(error)}`
             )
         }
     }
@@ -301,30 +317,18 @@ export class EdgeBrowsing extends BaseActivity {
         }
 
         if (!offer.hash) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                LOG_TAG,
-                `激活 offer 存在但缺少 hash | offerId=${offer.offerId}`
-            )
+            this.bot.logger.warn(this.bot.isMobile, LOG_TAG, `激活 offer 存在但缺少 hash | offerId=${offer.offerId}`)
             return 'failed'
         }
 
         if (!offer.reportable && !offer.isLocked) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                LOG_TAG,
-                `激活 offer 不可操作 | offerId=${offer.offerId}`
-            )
+            this.bot.logger.warn(this.bot.isMobile, LOG_TAG, `激活 offer 不可操作 | offerId=${offer.offerId}`)
             return 'failed'
         }
 
         const actionId = this.bot.nextActions.reportActivity
         if (!actionId) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                LOG_TAG,
-                '跳过激活：bundle 中未发现 "reportActivity" action id'
-            )
+            this.bot.logger.warn(this.bot.isMobile, LOG_TAG, '跳过激活：bundle 中未发现 "reportActivity" action id')
             return 'failed'
         }
 
@@ -647,11 +651,7 @@ export class EdgeBrowsing extends BaseActivity {
     private resolveSettings(profile: AppDashboardData): EdgeBrowsingSettings | null {
         const promotion = this.findPromotion(profile)
         if (!promotion) {
-            this.bot.logger.info(
-                this.bot.isMobile,
-                LOG_TAG,
-                '该账户无法使用 Edge 浏览连击（Browsing Streak）'
-            )
+            this.bot.logger.info(this.bot.isMobile, LOG_TAG, '该账户无法使用 Edge 浏览连击（Browsing Streak）')
             return null
         }
 
@@ -661,8 +661,7 @@ export class EdgeBrowsing extends BaseActivity {
             this.bot.logger.warn(
                 this.bot.isMobile,
                 LOG_TAG,
-                `跳过：优惠元数据不完整 | offerId=${offerId || 'missing'}` +
-                    ` | type=${activityType || 'missing'}`
+                `跳过：优惠元数据不完整 | offerId=${offerId || 'missing'}` + ` | type=${activityType || 'missing'}`
             )
             return null
         }

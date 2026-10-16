@@ -1,4 +1,5 @@
 import rebrowser, { BrowserContext } from 'patchright'
+import { existsSync } from 'node:fs'
 import { newInjectedContext } from 'fingerprint-injector'
 import { BrowserFingerprintWithHeaders, FingerprintGenerator } from 'fingerprint-generator'
 
@@ -57,7 +58,6 @@ class Browser {
             return false
         }
         try {
-            const { existsSync } = require('fs')
             const edgePaths = [
                 '/usr/bin/microsoft-edge-stable',
                 '/usr/bin/microsoft-edge',
@@ -79,9 +79,7 @@ class Browser {
         const headless = this.bot.config.headless
         const channel = this.bot.config.browserChannel ?? 'chromium'
         // 真实 Edge 依赖系统安装；linux 下若已安装 microsoft-edge-stable 则可用（2026-10-16 用户要求改用 Edge）
-        const useRealEdge =
-            channel === 'msedge' &&
-            (process.platform !== 'linux' || this.isEdgeInstalledOnLinux())
+        const useRealEdge = channel === 'msedge' && (process.platform !== 'linux' || this.isEdgeInstalledOnLinux())
 
         const hasProxy = Boolean(account.proxy.url)
         const ignoreCertificateErrors = hasProxy && this.bot.config.proxy.ignoreCertificateErrors
@@ -160,16 +158,10 @@ class Browser {
                     this.bot.isMobile,
                     'SESSION',
                     `正在恢复已保存的浏览器会话 | Cookie数=${session.storageState.cookies.length} | origins=${session.storageState.origins.length} | 已保存分钟数=${ageMinutes}` +
-                        (session.expiredCookiesRemoved
-                            ? ` | 已清除过期Cookie=${session.expiredCookiesRemoved}`
-                            : '')
+                        (session.expiredCookiesRemoved ? ` | 已清除过期Cookie=${session.expiredCookiesRemoved}` : '')
                 )
             } else {
-                this.bot.logger.info(
-                    this.bot.isMobile,
-                    'SESSION',
-                    '未找到已保存的浏览器会话；可能需要登录'
-                )
+                this.bot.logger.info(this.bot.isMobile, 'SESSION', '未找到已保存的浏览器会话；可能需要登录')
             }
 
             const shouldUseFingerprint = this.bot.isMobile
@@ -189,6 +181,7 @@ class Browser {
                     permissions: [],
                     ignoreHTTPSErrors: ignoreCertificateErrors,
                     locale: this.bot.accountLocale.locale,
+                    ...(this.bot.config.taskCoverage?.enabled && { timezoneId: this.bot.config.taskCoverage.timeZone }),
                     viewport: { width: 1920, height: 1080 },
                     // Restore cookies
                     ...(session?.storageState ? { storageState: session.storageState } : {}),
@@ -210,8 +203,7 @@ class Browser {
                 }
 
                 fingerprint =
-                    (reuseFingerprint && savedFingerprint) ||
-                    (await this.generateFingerprint(this.bot.isMobile))
+                    (reuseFingerprint && savedFingerprint) || (await this.generateFingerprint(this.bot.isMobile))
 
                 const screen = fingerprint.fingerprint.screen
 
@@ -219,6 +211,9 @@ class Browser {
                 const injected = await newInjectedContext(browser, {
                     fingerprint,
                     newContextOptions: {
+                        ...(this.bot.config.taskCoverage?.enabled && {
+                            timezoneId: this.bot.config.taskCoverage.timeZone
+                        }),
                         permissions: [],
                         ignoreHTTPSErrors: ignoreCertificateErrors,
                         // Restore cookies
@@ -249,9 +244,7 @@ class Browser {
             }
 
             context.on('page', p => {
-                p.on('crash', () =>
-                    this.bot.logger.error(this.bot.isMobile, 'BROWSER', `渲染器崩溃 | ${p.url()}`)
-                )
+                p.on('crash', () => this.bot.logger.error(this.bot.isMobile, 'BROWSER', `渲染器崩溃 | ${p.url()}`))
             })
             context.on('close', () => this.bot.logger.warn(this.bot.isMobile, 'BROWSER', '浏览器上下文已关闭'))
 

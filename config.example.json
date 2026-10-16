@@ -9,6 +9,12 @@
     "contintueOnBotWarning": false,
     "skipNonPointTasks": true,
     "prewarmDesktopLogin": false,
+    "taskCoverage": {
+        "timeZone": "Asia/Shanghai",
+        "enabled": true,
+        "maxPasses": 3,
+        "verificationAttempts": 3
+    },
     "accountDelay": {
         "min": "1min",
         "max": "3min"
@@ -40,10 +46,7 @@
         "maxBonusSearches": 110,
         "parallelSearching": false,
         "clusterSearch": true,
-        "queryEngines": [
-            "china",
-            "local"
-        ],
+        "queryEngines": ["china", "local"],
         "searchResultVisitTime": "20sec",
         "searchDelay": {
             "min": "6min",

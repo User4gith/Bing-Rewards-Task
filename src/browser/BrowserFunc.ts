@@ -9,10 +9,12 @@ import { loadSession, saveStorageState } from '../util/SessionStore'
 import { isBrowserClosedError } from '../util/Utils'
 
 import type { DashboardData } from './../interface/DashboardData'
-import type { AppUserData } from '../interface/AppUserData'
 import type { AppEarnablePoints, BrowserEarnablePoints } from '../interface/Points'
 import type { AppDashboardData } from '../interface/AppDashBoardData'
 import { detectFlyoutBotWarning, mapFlyoutToDashboard, type RewardsFlyoutData } from './FlyoutDashboard'
+import { fetchRewardsInBrowser, validRewardsContent } from './RewardsFetch'
+import { taskDate } from '../functions/activities/rewards/TaskDiscovery'
+import { parsedOfferPromotion } from '../functions/activities/rewards/TaskDiscovery'
 
 export default class BrowserFunc {
     private bot: MicrosoftRewardsBot
@@ -20,6 +22,13 @@ export default class BrowserFunc {
     private rewardsDeploymentId = ''
 
     private useFlyoutDashboardFallback = false
+    private retryPrimaryAt = 0
+
+    resetDashboardSource(): void {
+        this.useFlyoutDashboardFallback = false
+        this.retryPrimaryAt = 0
+        this.botMetricsLoggedPlatforms.clear()
+    }
 
     private botMetricsLoggedPlatforms = new Set<string>()
 
@@ -32,7 +41,7 @@ export default class BrowserFunc {
         delete fingerprintHeaders['Cookie']
         delete fingerprintHeaders['cookie']
 
-        if (!this.useFlyoutDashboardFallback) {
+        if (!this.useFlyoutDashboardFallback || Date.now() >= this.retryPrimaryAt) {
             let primaryError: unknown
             const backoffMs = [1000, 3000]
 
@@ -45,14 +54,22 @@ export default class BrowserFunc {
                             ...fingerprintHeaders,
                             Cookie: this.buildCookieHeader(this.getCachedCookies(cookies, URLs.rewards.userInfoApi)),
                             Referer: URLs.rewards.referer,
-                            Origin: URLs.rewards.origin
+                            Origin: URLs.rewards.origin,
+                            'Cache-Control': 'no-cache'
                         },
                         retries: 0
                     })
 
                     await this.applyResponseCookies(URLs.rewards.userInfoApi, response.headers['set-cookie'])
 
-                    if (response.data?.dashboard) {
+                    if (
+                        response.data?.dashboard?.userStatus &&
+                        typeof response.data.dashboard.userStatus.availablePoints === 'number' &&
+                        Number.isFinite(response.data.dashboard.userStatus.availablePoints) &&
+                        response.data.dashboard.userStatus.isRewardsUser !== false
+                    ) {
+                        this.useFlyoutDashboardFallback = false
+                        response.data.source = 'primary'
                         this.logBotDetectionMetrics(response.data)
                         return response.data
                     }
@@ -71,6 +88,7 @@ export default class BrowserFunc {
             }
 
             this.useFlyoutDashboardFallback = true
+            this.retryPrimaryAt = Date.now() + 30_000
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'GET-DASHBOARD-DATA',
@@ -78,7 +96,48 @@ export default class BrowserFunc {
             )
         }
 
-        return await this.getFlyoutDashboardData(cookies, fingerprintHeaders)
+        try {
+            return await this.getFlyoutDashboardData(cookies, fingerprintHeaders)
+        } catch (error) {
+            return await this.getPageDashboardData(error)
+        }
+    }
+
+    private async getPageDashboardData(cause: unknown): Promise<DashboardData> {
+        const snapshot = await this.refreshEarnSnapshot()
+        if (!snapshot || snapshot.account.availablePoints === null) throw cause
+        this.bot.logger.warn(
+            this.bot.isMobile,
+            'GET-DASHBOARD-DATA',
+            'API 来源不可用；使用已核验账户的页面任务，任务覆盖范围仍待核验'
+        )
+        const profile = { attributes: { country: this.bot.accountLocale.country ?? this.bot.userData.geoLocale } }
+        return {
+            source: 'page',
+            profile,
+            dashboard: {
+                userStatus: {
+                    availablePoints: snapshot.account.availablePoints,
+                    isRewardsUser: true,
+                    counters: snapshot.searchCounters ?? {}
+                },
+                userProfile: profile,
+                userWarnings: [],
+                dailySetPromotions: {},
+                morePromotions: [],
+                morePromotionsWithoutPromotionalItems: [],
+                promotionalItems: snapshot.offers.map(parsedOfferPromotion),
+                punchCards: (snapshot.quests ?? []).map(parent => ({
+                    parentPromotion: {
+                        offerId: parent.offerId,
+                        title: parent.title,
+                        complete: parent.complete,
+                        pointProgressMax: parent.pointProgressMax
+                    },
+                    childPromotions: []
+                }))
+            }
+        } as unknown as DashboardData
     }
 
     private async getFlyoutDashboardData(
@@ -98,7 +157,8 @@ export default class BrowserFunc {
                         Accept: 'application/json',
                         Cookie: this.buildCookieHeader(this.getCachedCookies(cookies, URLs.bing.rewardsFlyoutUserInfo)),
                         Referer: `${URLs.bing.origin}/`,
-                        Origin: URLs.bing.origin
+                        Origin: URLs.bing.origin,
+                        'Cache-Control': 'no-cache'
                     },
                     retries: 0
                 })
@@ -146,10 +206,9 @@ export default class BrowserFunc {
         const firstTime = !this.botMetricsLoggedPlatforms.has(platform)
         this.botMetricsLoggedPlatforms.add(platform)
 
-        const message =
-            `机器人检测指标 | serpbotscore=${score ?? '未知'} | 更新时间=${
-                scoreUpdated ? String(scoreUpdated).slice(0, 16) : '未知'
-            } | userWarnings=${warningNames.length > 0 ? warningNames.join(', ') : '无'}`
+        const message = `机器人检测指标 | serpbotscore=${score ?? '未知'} | 更新时间=${
+            scoreUpdated ? String(scoreUpdated).slice(0, 16) : '未知'
+        } | userWarnings=${warningNames.length > 0 ? warningNames.join(', ') : '无'}`
 
         if (warningNames.length > 0) {
             this.bot.logger.warn(this.bot.isMobile, 'GET-DASHBOARD-DATA', message)
@@ -245,8 +304,6 @@ export default class BrowserFunc {
 
     async getAppEarnablePoints(): Promise<AppEarnablePoints> {
         try {
-            const eligibleOffers = ['ENUS_readarticle3_30points', 'Gamification_Sapphire_DailyCheckIn']
-
             const request: HttpRequestConfig = {
                 url: URLs.platform.me('SAAndroid'),
                 method: 'GET',
@@ -258,10 +315,10 @@ export default class BrowserFunc {
                 }
             }
 
-            const response = await this.bot.http.request<AppUserData>(request)
-            const userData: AppUserData = response.data
+            const response = await this.bot.http.request<AppDashboardData>(request)
+            const userData = response.data
             const eligibleActivities = userData.response.promotions.filter(x =>
-                eligibleOffers.includes(x.attributes.offerid ?? '')
+                ['msnreadearn', 'checkin'].includes((x.attributes.type ?? '').toLowerCase())
             )
 
             let readToEarn = 0
@@ -278,9 +335,11 @@ export default class BrowserFunc {
                     const progress = parseInt(attrs.progress ?? '0')
                     const checkInDay = progress % 7
                     const lastUpdated = new Date(attrs.last_updated ?? '')
-                    const today = new Date()
-
-                    if (checkInDay < 6 && today.getDate() !== lastUpdated.getDate()) {
+                    const completedToday =
+                        Number.isFinite(lastUpdated.getTime()) &&
+                        taskDate(this.bot.userData.timezoneOffset, lastUpdated.getTime()) ===
+                            taskDate(this.bot.userData.timezoneOffset)
+                    if (!completedToday) {
                         checkIn = parseInt(attrs[`day_${checkInDay + 1}_points`] ?? '0')
                     }
                 }
@@ -307,7 +366,9 @@ export default class BrowserFunc {
         try {
             const data = await this.getDashboardData()
 
-            return data.dashboard.userStatus.availablePoints
+            const points = data.dashboard.userStatus.availablePoints
+            if (!Number.isSafeInteger(points) || points < 0) throw new Error('官网余额缺失或无效，不能以 0 代替')
+            return points
         } catch (error) {
             this.bot.logger.error(
                 this.bot.isMobile,
@@ -359,15 +420,12 @@ export default class BrowserFunc {
                 // 1. account data parsed from the React payload (logged-in proof)
                 // 2. page actually contains Rewards content (not a redirect shell)
                 const account = this.bot.reactSnapshot.account
-                const hasAccountData =
-                    account.availablePoints !== null || account.level !== null
+                const hasAccountData = account.availablePoints !== null || account.level !== null
                 const pageUrl = page.url()
-                const isLoginRedirect =
-                    /login\.live\.com|account\.microsoft\.com/i.test(pageUrl)
+                const isLoginRedirect = /login\.live\.com|account\.microsoft\.com/i.test(pageUrl)
                 const isAboutShell = /\/about\/?(?:[?#]|$)/i.test(pageUrl)
                 const joined = sources.join('\n')
-                const hasRewardsContent =
-                    /Microsoft\s*Rewards|微软奖励|赚取奖励|Earn\s*rewards/i.test(joined)
+                const hasRewardsContent = /Microsoft\s*Rewards|微软奖励|赚取奖励|Earn\s*rewards/i.test(joined)
 
                 if (isLoginRedirect || isAboutShell) {
                     throw new Error(
@@ -465,22 +523,21 @@ export default class BrowserFunc {
         // 优先使用 page.request（标准方式）
         try {
             const res = await page.request.get(url, { timeout: 20000 })
-            if (res.ok()) return await res.text()
+            if (res.ok()) {
+                const text = await res.text()
+                if (
+                    new URL(res.url()).origin === new URL(url).origin &&
+                    validRewardsContent(text, res.headers()['content-type'] ?? '', 'html')
+                )
+                    return text
+            }
         } catch {
             // 忽略，进入浏览器内 fetch 兜底
         }
 
         // 兜底：使用浏览器内的原生 fetch（绕过代理对 APIRequestContext 的阻止）
         try {
-            const text = await page.evaluate(async (fetchUrl: string) => {
-                try {
-                    const res = await fetch(fetchUrl, { credentials: 'same-origin' })
-                    if (!res.ok) return null
-                    return await res.text()
-                } catch {
-                    return null
-                }
-            }, url)
+            const text = await fetchRewardsInBrowser(page, url, 'html')
 
             if (text && typeof text === 'string' && text.length > 0) {
                 return text
@@ -489,11 +546,7 @@ export default class BrowserFunc {
             // 忽略，返回空字符串
         }
 
-        this.bot.logger.warn(
-            this.bot.isMobile,
-            'BOOTSTRAP',
-            `获取 ${route} HTML 失败 - 快照和 action 发现可能不完整`
-        )
+        this.bot.logger.warn(this.bot.isMobile, 'BOOTSTRAP', `获取 ${route} HTML 失败 - 快照和 action 发现可能不完整`)
 
         return ''
     }
@@ -592,8 +645,14 @@ export default class BrowserFunc {
                 try {
                     const res = await page.request.get(url, { timeout: 15000 })
                     if (res.ok()) {
-                        result.set(path, await res.text())
-                        return
+                        const text = await res.text()
+                        if (
+                            new URL(res.url()).origin === new URL(url).origin &&
+                            validRewardsContent(text, res.headers()['content-type'] ?? '', 'javascript')
+                        ) {
+                            result.set(path, text)
+                            return
+                        }
                     }
                 } catch {
                     // 忽略，进入浏览器内 fetch 兜底
@@ -602,20 +661,7 @@ export default class BrowserFunc {
                 // 兜底：使用浏览器内的原生 fetch（绕过代理对 APIRequestContext 的阻止）
                 // 通过 page.evaluate 在页面上下文中执行，走浏览器的网络栈
                 try {
-                    const text = await page.evaluate(async (fetchUrl: string) => {
-                        try {
-                            const res = await fetch(fetchUrl, { credentials: 'same-origin' })
-                            if (!res.ok) return null
-                            const ct = res.headers.get('content-type') ?? ''
-                            // 仅接受 JavaScript 内容
-                            if (ct && !ct.includes('javascript') && !ct.includes('ecmascript')) {
-                                // 允许无 content-type 的情况（某些代理不返回）
-                            }
-                            return await res.text()
-                        } catch {
-                            return null
-                        }
-                    }, url)
+                    const text = await fetchRewardsInBrowser(page, url, 'javascript')
 
                     if (text && typeof text === 'string' && text.length > 0) {
                         result.set(path, text)
@@ -697,11 +743,7 @@ export default class BrowserFunc {
                 if (isBrowserClosedError(error)) {
                     this.bot.logger.debug(this.bot.isMobile, 'CLOSE-BROWSER', '浏览器已处于关闭状态。')
                 } else {
-                    this.bot.logger.warn(
-                        this.bot.isMobile,
-                        'CLOSE-BROWSER',
-                        '关闭时遇到错误，但进程仍在退出。'
-                    )
+                    this.bot.logger.warn(this.bot.isMobile, 'CLOSE-BROWSER', '关闭时遇到错误，但进程仍在退出。')
                 }
             }
         }
@@ -722,15 +764,17 @@ export default class BrowserFunc {
         try {
             const response = await page.request.get(url, { timeout: 20000 })
             if (response.ok()) {
-                await this.syncActiveCookies(page, 'REWARDS-PAGE')
-                return await response.text()
+                const text = await response.text()
+                if (
+                    new URL(response.url()).origin === new URL(url).origin &&
+                    validRewardsContent(text, response.headers()['content-type'] ?? '', 'html')
+                ) {
+                    await this.syncActiveCookies(page, 'REWARDS-PAGE')
+                    return text
+                }
             }
 
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'REWARDS-PAGE',
-                `获取 ${route} 失败 | 状态码=${response.status()}`
-            )
+            this.bot.logger.debug(this.bot.isMobile, 'REWARDS-PAGE', `获取 ${route} 失败 | 状态码=${response.status()}`)
         } catch (error) {
             this.bot.logger.debug(
                 this.bot.isMobile,
@@ -739,6 +783,13 @@ export default class BrowserFunc {
             )
         }
 
+        try {
+            const html = await fetchRewardsInBrowser(page, url, 'html')
+            if (html) return html
+        } catch {}
+        try {
+            if (new URL(page.url()).pathname === new URL(url).pathname) return await page.content()
+        } catch {}
         return null
     }
 
@@ -750,11 +801,7 @@ export default class BrowserFunc {
     async checkpointActiveSession(source = 'SESSION-CHECKPOINT'): Promise<boolean> {
         const page = this.getActivePage()
         if (!page) {
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                source,
-                '无法保存会话检查点，因为没有可用的活动浏览器页面'
-            )
+            this.bot.logger.debug(this.bot.isMobile, source, '无法保存会话检查点，因为没有可用的活动浏览器页面')
             return false
         }
 
@@ -1096,7 +1143,10 @@ export default class BrowserFunc {
         ])
         const availablePages = pages.filter((html): html is string => html !== null)
 
-        return availablePages.length ? this.bot.browser.react.snapshotPage(availablePages) : null
+        if (!availablePages.length) return null
+        const snapshot = this.bot.browser.react.snapshotPage(availablePages)
+        snapshot.missingSources = ['/earn', '/dashboard'].filter((_route, index) => !pages[index])
+        return snapshot
     }
 
     private async fetchRewardsHtml(url: string, route: string): Promise<string | null> {
@@ -1112,13 +1162,17 @@ export default class BrowserFunc {
                     ...headers,
                     Cookie: this.buildCookieHeader(this.getCachedCookies(undefined, url)),
                     Referer: URLs.rewards.referer,
-                    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Cache-Control': 'no-cache'
                 },
                 responseType: 'text'
             })
 
             await this.applyResponseCookies(url, response.headers['set-cookie'])
-            return typeof response.data === 'string' ? response.data : null
+            return typeof response.data === 'string' &&
+                validRewardsContent(response.data, (response.headers['content-type'] as string) ?? '', 'html')
+                ? response.data
+                : null
         } catch (error) {
             this.bot.logger.debug(
                 this.bot.isMobile,
