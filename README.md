@@ -603,6 +603,34 @@ gmya.net 免费档对连续请求有频率限制。解决方法：
 
 ---
 
+## 📝 更新记录
+
+### v4.3.2.4-stable-20261016 (2026-10-16)
+
+本版本包含以下修复与改进（基于上游 V4-china）：
+
+**移动端兼容修复**
+- 修复移动端 bootstrap 误报问题：移动端 `/earn` 页面正常渲染（HTTP 200）但不含 `section#dailyset`，原逻辑误判为页面未渲染
+- 分离移动端/桌面端页面渲染检查：桌面端保留 `section#dailyset` 检查，移动端采用多信号验证（区分登录失败/页面加载失败/结构变更/数据解析失败）
+- 新增移动端 HTML 账户数据解析：从移动端页面 HTML 中直接解析积分与会员等级，不再虚构数值
+
+**UrlReward 修复**
+- 修复 `reportActivity` Action ID 解析失败：代理 `127.0.0.1:3129` 导致 `page.request` 获取 JS chunk 全部 abort，零解析
+- 新增浏览器上下文原生 `fetch()` 兜底：`fetchJsChunks()` 与 `fetchBootstrapHtml()` 在 `page.request` 失败时自动切换
+- 实测：66/66 JS chunks 获取成功，解析出 16 个 Action ID（含 `reportActivity`）
+- 验证：`周中拼图` 任务端到端成功（server 200，`acknowledged=true`，+5 分）
+
+**诊断与运维**
+- 新增独立账户诊断工具 `src/diagnose-account.ts`：只读诊断账户状态、积分、会员等级
+- 恢复 TLS 严格证书校验：移除诊断工具中的 `ignoreHTTPSErrors` 绕过，证书问题不再被掩盖
+- 新增 `start-with-persistent-logs.sh`：持久化日志启动脚本，日志写入 `~/ms-rewards-logs/`（保留 30 天），替代 `/tmp` 临时日志
+
+**测试**
+- 新增移动端解析单元测试 `src/__tests__/mobile-parse.test.ts`（14/14 通过）
+- 构建（`npm run build`）与类型检查（`tsc --noEmit`）通过
+
+---
+
 ## 📜 同步与致谢
 
 本项目 fork 自 [TheNetsky/Microsoft-Rewards-Script](https://github.com/TheNetsky/Microsoft-Rewards-Script)，`V4-china` 分支基于上游 **v4 分支**（新版 dashboard 架构）做国内本地化：
