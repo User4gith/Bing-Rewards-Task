@@ -34,8 +34,9 @@ export default class BrowserFunc {
 
         if (!this.useFlyoutDashboardFallback) {
             let primaryError: unknown
+            const backoffMs = [1000, 3000]
 
-            for (let attempt = 1; attempt <= 2; attempt++) {
+            for (let attempt = 1; attempt <= 3; attempt++) {
                 try {
                     const response = await this.bot.http.request<DashboardData>({
                         url: URLs.rewards.userInfoApi,
@@ -58,13 +59,13 @@ export default class BrowserFunc {
                     throw new Error('Dashboard data missing from API response')
                 } catch (error) {
                     primaryError = error
-                    if (attempt === 1) {
+                    if (attempt < 3) {
                         this.bot.logger.warn(
                             this.bot.isMobile,
                             'GET-DASHBOARD-DATA',
-                            `主接口请求失败，正在重试一次 | 信息=${this.errorMessage(error)}`
+                            `主接口请求失败，${backoffMs[attempt - 1]}ms 后重试 (${attempt}/3) | 信息=${this.errorMessage(error)}`
                         )
-                        await new Promise(resolve => setTimeout(resolve, 1000))
+                        await new Promise(resolve => setTimeout(resolve, backoffMs[attempt - 1]))
                     }
                 }
             }
@@ -84,39 +85,54 @@ export default class BrowserFunc {
         cookies: Cookie[] | undefined,
         fingerprintHeaders: Record<string, string>
     ): Promise<DashboardData> {
-        try {
-            const response = await this.bot.http.request<RewardsFlyoutData>({
-                url: URLs.bing.rewardsFlyoutUserInfo,
-                method: 'GET',
-                headers: {
-                    ...fingerprintHeaders,
-                    Accept: 'application/json',
-                    Cookie: this.buildCookieHeader(this.getCachedCookies(cookies, URLs.bing.rewardsFlyoutUserInfo)),
-                    Referer: `${URLs.bing.origin}/`,
-                    Origin: URLs.bing.origin
-                },
-                retries: 0
-            })
+        const backoffMs = [1000, 3000]
+        let lastError: unknown
 
-            await this.applyResponseCookies(URLs.bing.rewardsFlyoutUserInfo, response.headers['set-cookie'])
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const response = await this.bot.http.request<RewardsFlyoutData>({
+                    url: URLs.bing.rewardsFlyoutUserInfo,
+                    method: 'GET',
+                    headers: {
+                        ...fingerprintHeaders,
+                        Accept: 'application/json',
+                        Cookie: this.buildCookieHeader(this.getCachedCookies(cookies, URLs.bing.rewardsFlyoutUserInfo)),
+                        Referer: `${URLs.bing.origin}/`,
+                        Origin: URLs.bing.origin
+                    },
+                    retries: 0
+                })
 
-            const detection = detectFlyoutBotWarning(response.data)
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'GET-DASHBOARD-DATA',
-                `使用 Bing flyout 部分仪表板 | 疑似受限=${detection.likelyLimited} | bot标记=${detection.hasBotProfileMarkers} | 活动折叠=${detection.hasCollapsedActivities}`
-            )
-            const mappedDashboard = mapFlyoutToDashboard(response.data)
-            this.logBotDetectionMetrics(mappedDashboard)
-            return mappedDashboard
-        } catch (error) {
-            this.bot.logger.error(
-                this.bot.isMobile,
-                'GET-DASHBOARD-DATA',
-                `获取仪表板数据失败（主接口与 Bing flyout 兜底均失败）: ${this.errorMessage(error)}`
-            )
-            throw error
+                await this.applyResponseCookies(URLs.bing.rewardsFlyoutUserInfo, response.headers['set-cookie'])
+
+                const detection = detectFlyoutBotWarning(response.data)
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'GET-DASHBOARD-DATA',
+                    `使用 Bing flyout 部分仪表板 | 疑似受限=${detection.likelyLimited} | bot标记=${detection.hasBotProfileMarkers} | 活动折叠=${detection.hasCollapsedActivities}`
+                )
+                const mappedDashboard = mapFlyoutToDashboard(response.data)
+                this.logBotDetectionMetrics(mappedDashboard)
+                return mappedDashboard
+            } catch (error) {
+                lastError = error
+                if (attempt < 3) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'GET-DASHBOARD-DATA',
+                        `flyout 请求失败，${backoffMs[attempt - 1]}ms 后重试 (${attempt}/3) | 信息=${this.errorMessage(error)}`
+                    )
+                    await new Promise(resolve => setTimeout(resolve, backoffMs[attempt - 1]))
+                }
+            }
         }
+
+        this.bot.logger.error(
+            this.bot.isMobile,
+            'GET-DASHBOARD-DATA',
+            `获取仪表板数据失败（主接口 3 次与 Bing flyout 3 次均失败）: ${this.errorMessage(lastError)}`
+        )
+        throw lastError
     }
 
     private logBotDetectionMetrics(data: DashboardData): void {
@@ -330,9 +346,56 @@ export default class BrowserFunc {
             this.bot.nextActions = await this.resolveActionIds(page, sources)
 
             const dashboardRendered = /<section\b[^>]*\bid=["']dailyset["']/i.test(sources.join('\n'))
-            if (!dashboardRendered) {
+            if (!dashboardRendered && !this.bot.isMobile) {
                 throw new Error(
                     'Rewards dashboard did not render (no section#dailyset) - likely a login/redirect issue, aborting'
+                )
+            }
+
+            if (this.bot.isMobile && !dashboardRendered) {
+                // Mobile uses a different page structure than desktop: the /earn
+                // page renders account data and offers without section#dailyset.
+                // Validate via trusted signals instead of the desktop selector:
+                // 1. account data parsed from the React payload (logged-in proof)
+                // 2. page actually contains Rewards content (not a redirect shell)
+                const account = this.bot.reactSnapshot.account
+                const hasAccountData =
+                    account.availablePoints !== null || account.level !== null
+                const pageUrl = page.url()
+                const isLoginRedirect =
+                    /login\.live\.com|account\.microsoft\.com/i.test(pageUrl)
+                const isAboutShell = /\/about\/?(?:[?#]|$)/i.test(pageUrl)
+                const joined = sources.join('\n')
+                const hasRewardsContent =
+                    /Microsoft\s*Rewards|微软奖励|赚取奖励|Earn\s*rewards/i.test(joined)
+
+                if (isLoginRedirect || isAboutShell) {
+                    throw new Error(
+                        `Rewards mobile page not authenticated (redirected to ${pageUrl}) - session invalid or login required, aborting`
+                    )
+                }
+
+                if (!hasAccountData && !hasRewardsContent) {
+                    throw new Error(
+                        'Rewards mobile page failed to load (no account data and no Rewards content) - likely a network or page load failure, aborting'
+                    )
+                }
+
+                if (!hasAccountData && hasRewardsContent) {
+                    // Page shell rendered but account payload missing: could be a
+                    // structure change in the React payload. Warn loudly but do
+                    // not abort - downstream steps validate account state again.
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'BOOTSTRAP',
+                        '移动端页面已渲染但未解析到账户数据 - 可能是 React 载荷结构变化，后续步骤将再次校验账户状态'
+                    )
+                }
+
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'BOOTSTRAP',
+                    `移动端页面渲染检查通过 | 账户积分=${account.availablePoints} | 等级=${account.level} | 有Rewards内容=${hasRewardsContent}`
                 )
             }
 

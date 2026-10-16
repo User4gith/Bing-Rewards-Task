@@ -470,6 +470,24 @@ export default class ReactFunc {
                 availablePoints: (header.availablePoints as number) ?? (membership.availablePoints as number) ?? null
             }
 
+            // Mobile fallback: the mobile /earn page server-renders account data
+            // as plain HTML (e.g. <p>1,225</p> next to membership level text)
+            // instead of embedding it in the React JSON payload. Only use this
+            // when the JSON payload yielded nothing, and only extract values
+            // that are actually present in the page.
+            if (account.availablePoints === null) {
+                const mobilePoints = this.extractMobilePointsFromHtml(combined)
+                if (mobilePoints !== null) {
+                    account.availablePoints = mobilePoints
+                }
+            }
+            if (account.level === null) {
+                const mobileLevel = this.extractMobileLevelFromHtml(combined)
+                if (mobileLevel !== null) {
+                    account.level = mobileLevel
+                }
+            }
+
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'REACT-PARSE',
@@ -493,6 +511,71 @@ export default class ReactFunc {
                 `解析账户失败 | 错误=${error instanceof Error ? error.message : String(error)}`
             )
             return empty
+        }
+    }
+
+    /**
+     * Mobile fallback: extract available points from server-rendered HTML.
+     * The mobile /earn page shows points as <p>1,225</p> adjacent to the
+     * membership level label (e.g. <img alt="银牌会员">), without embedding
+     * them in the React JSON payload. Returns null when no such pattern exists.
+     * Never fabricates a value: 0 points is a valid result and is returned as 0.
+     */
+    private extractMobilePointsFromHtml(html: string): number | null {
+        try {
+            // Header pattern: <p>NUMBER</p> directly followed by membership img/alt.
+            // This is the account header, not task card numbers.
+            const headerRe =
+                /<p[^>]*>\s*([\d,]+)\s*<\/p>\s*<img[^>]*alt="([^"]*(?:银牌会员|金牌会员|Silver Member|Gold Member)[^"]*)"/i
+            const hm = headerRe.exec(html)
+            if (hm) {
+                const value = parseInt(hm[1]!.replace(/,/g, ''), 10)
+                if (Number.isFinite(value)) return value
+            }
+            // Fallback: any <p>NUMBER</p> near a membership label within 500 chars.
+            const pRe = /<p[^>]*>\s*([\d,]+)\s*<\/p>/gi
+            const levelRe = /银牌会员|金牌会员|Silver Member|Gold Member/i
+            let m: RegExpExecArray | null
+            while ((m = pRe.exec(html)) !== null) {
+                const pos = m.index ?? 0
+                const window = html.substring(Math.max(0, pos - 500), pos + 500)
+                if (levelRe.test(window)) {
+                    const value = parseInt(m[1]!.replace(/,/g, ''), 10)
+                    if (Number.isFinite(value)) return value
+                }
+            }
+            return null
+        } catch {
+            return null
+        }
+    }
+
+    /**
+     * Mobile fallback: extract membership level from server-rendered HTML.
+     * Looks for the level label in the account header (near the points display),
+     * not promotional text elsewhere on the page (e.g. "升级到金牌会员").
+     * Maps 银牌会员/Silver Member -> 1, 金牌会员/Gold Member -> 2.
+     * Returns null when no membership label is found in the header.
+     */
+    private extractMobileLevelFromHtml(html: string): number | null {
+        try {
+            // Header pattern: level img adjacent to points <p>
+            const headerRe =
+                /<p[^>]*>\s*[\d,]+\s*<\/p>\s*<img[^>]*alt="([^"]*)"/i
+            const hm = headerRe.exec(html)
+            if (hm) {
+                const alt = hm[1] ?? ''
+                if (/金牌|Gold/i.test(alt)) return 2
+                if (/银牌|Silver/i.test(alt)) return 1
+            }
+            // Fallback: first level label in document order (header appears first)
+            const firstGold = html.search(/金牌会员|Gold Member/i)
+            const firstSilver = html.search(/银牌会员|Silver Member/i)
+            if (firstGold >= 0 && (firstSilver < 0 || firstGold < firstSilver)) return 2
+            if (firstSilver >= 0) return 1
+            return null
+        } catch {
+            return null
         }
     }
 

@@ -48,11 +48,40 @@ class Browser {
         this.userAgentManager = new UserAgentManager(bot)
     }
 
+    /**
+     * 检测 Linux 系统是否安装了 Microsoft Edge（2026-10-16 用户要求改用 Edge 后新增）。
+     * 检查常见的 Edge 可执行文件路径。
+     */
+    private isEdgeInstalledOnLinux(): boolean {
+        if (process.platform !== 'linux') {
+            return false
+        }
+        try {
+            const { existsSync } = require('fs')
+            const edgePaths = [
+                '/usr/bin/microsoft-edge-stable',
+                '/usr/bin/microsoft-edge',
+                '/opt/microsoft/msedge/msedge'
+            ]
+            return edgePaths.some(p => {
+                try {
+                    return existsSync(p)
+                } catch {
+                    return false
+                }
+            })
+        } catch {
+            return false
+        }
+    }
+
     async createBrowser(account: Account): Promise<BrowserCreationResult> {
         const headless = this.bot.config.headless
         const channel = this.bot.config.browserChannel ?? 'chromium'
-        // 真实 Edge 依赖系统安装；linux（docker）环境通常没有，回退内置补丁版 Chromium
-        const useRealEdge = channel === 'msedge' && process.platform !== 'linux'
+        // 真实 Edge 依赖系统安装；linux 下若已安装 microsoft-edge-stable 则可用（2026-10-16 用户要求改用 Edge）
+        const useRealEdge =
+            channel === 'msedge' &&
+            (process.platform !== 'linux' || this.isEdgeInstalledOnLinux())
 
         const hasProxy = Boolean(account.proxy.url)
         const ignoreCertificateErrors = hasProxy && this.bot.config.proxy.ignoreCertificateErrors
