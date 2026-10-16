@@ -8,6 +8,7 @@ import { findPromotion } from '../rewards/TaskDiscovery'
 
 interface ActivityQueries {
     title: string
+    aliases?: string[]
     queries: string[]
 }
 
@@ -59,51 +60,81 @@ export function findSearchOnBingOffer(dashboard: Dashboard, offerId: string): Ba
 }
 
 export async function getSearchOnBingQueries(bot: MicrosoftRewardsBot, promotion: BasePromotion): Promise<string[]> {
+    // Bundled, curated queries must be used even with the default remote-enabled
+    // configuration. Remote data supplements titles not yet covered locally.
     try {
-        let activities: ActivityQueries[]
-
-        if (bot.config.searchOnBingLocalQueries) {
-            bot.logger.debug(bot.isMobile, 'SEARCH-ON-BING-QUERY', '使用本地查询词配置文件')
-            activities = JSON.parse(
-                fs.readFileSync(path.join(__dirname, '../../bing-search-activity-queries.json'), 'utf8')
-            ) as ActivityQueries[]
-        } else {
-            bot.logger.debug(bot.isMobile, 'SEARCH-ON-BING-QUERY', '从远程仓库获取查询词配置')
-            activities = (
-                await bot.http.request<ActivityQueries[]>({
-                    method: 'GET',
-                    url: URLs.github.searchOnBingQueries
-                })
-            ).data
-        }
-
-        const match = activities.find(
-            activity => bot.utils.normalizeString(activity.title) === bot.utils.normalizeString(promotion.title)
+        const activities: unknown = JSON.parse(
+            fs.readFileSync(path.join(__dirname, '../../bing-search-activity-queries.json'), 'utf8')
         )
-        if (match?.queries.length) {
-            const shuffled = bot.utils.shuffleArray(match.queries)
-            bot.logger.info(
+        const queries = findQueries(activities, promotion.title)
+        if (queries.length) return preparedQueries(bot, promotion.title, queries, '本地增强词库')
+    } catch (error) {
+        bot.logger.warn(
+            bot.isMobile,
+            'SEARCH-ON-BING-QUERY',
+            `本地主题词库不可用 | 错误=${error instanceof Error ? error.message : String(error)}`
+        )
+    }
+
+    if (!bot.config.searchOnBingLocalQueries) {
+        try {
+            const response = await bot.http.request<unknown>({
+                method: 'GET',
+                url: URLs.github.searchOnBingQueries
+            })
+            const queries = findQueries(response.data, promotion.title)
+            if (queries.length) return preparedQueries(bot, promotion.title, queries, '远程补充词库')
+        } catch (error) {
+            bot.logger.warn(
                 bot.isMobile,
                 'SEARCH-ON-BING-QUERY',
-                `为 "${promotion.title}" 找到 ${shuffled.length} 条查询词 | 来源=${bot.config.searchOnBingLocalQueries ? '本地' : '远程'}`
+                `远程主题词库不可用 | 标题="${promotion.title}" | 错误=${error instanceof Error ? error.message : String(error)}`
             )
-            return shuffled
         }
-
-        bot.logger.info(
-            bot.isMobile,
-            'SEARCH-ON-BING-QUERY',
-            `"${promotion.title}" 无精选查询词，回退使用活动标题与描述`
-        )
-        return fallbackQueries(promotion)
-    } catch (error) {
-        bot.logger.error(
-            bot.isMobile,
-            'SEARCH-ON-BING-QUERY',
-            `解析查询词出错 | 标题="${promotion.title}" | 错误=${error instanceof Error ? error.message : String(error)} | 回退=标题与描述`
-        )
-        return fallbackQueries(promotion)
     }
+
+    bot.logger.info(bot.isMobile, 'SEARCH-ON-BING-QUERY', `"${promotion.title}" 无精选查询词，回退使用活动标题与描述`)
+    return fallbackQueries(promotion)
+}
+
+function normalizeTitle(value: string): string {
+    // Preserve non-Latin letters: removing them would make unrelated Chinese
+    // titles compare equal. Ignore punctuation, spacing and letter case only.
+    return value
+        .normalize('NFKC')
+        .toLowerCase()
+        .replace(/[\p{P}\p{S}\s]+/gu, '')
+}
+
+function findQueries(payload: unknown, title: string): string[] {
+    const key = normalizeTitle(title ?? '')
+    if (!key || !Array.isArray(payload)) return []
+    const queries: string[] = []
+    for (const entry of payload) {
+        if (!entry || typeof entry !== 'object') continue
+        const activity = entry as Partial<ActivityQueries>
+        const titles = [activity.title, ...(Array.isArray(activity.aliases) ? activity.aliases : [])]
+        if (!titles.some(candidate => typeof candidate === 'string' && normalizeTitle(candidate) === key)) continue
+        if (Array.isArray(activity.queries)) {
+            queries.push(...activity.queries.filter((query): query is string => typeof query === 'string'))
+        }
+    }
+    const unique = new Map<string, string>()
+    for (const query of queries) {
+        const clean = query.trim().replace(/\s+/g, ' ')
+        if (clean) unique.set(clean.normalize('NFKC').toLowerCase(), clean)
+    }
+    return [...unique.values()]
+}
+
+function preparedQueries(bot: MicrosoftRewardsBot, title: string, queries: string[], source: string): string[] {
+    const shuffled = bot.utils.shuffleArray(queries)
+    bot.logger.info(
+        bot.isMobile,
+        'SEARCH-ON-BING-QUERY',
+        `为 "${title}" 找到 ${shuffled.length} 条查询词 | 来源=${source}`
+    )
+    return shuffled
 }
 
 function fallbackQueries(promotion: BasePromotion): string[] {
