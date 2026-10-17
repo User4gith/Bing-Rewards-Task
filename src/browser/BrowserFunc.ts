@@ -406,10 +406,27 @@ export default class BrowserFunc {
             // discovered from chunks referenced by either page
             this.bot.nextActions = await this.resolveActionIds(page, sources)
 
-            const dashboardRendered = /<section\b[^>]*\bid=["']dailyset["']/i.test(sources.join('\n'))
+            const html = sources.join('\n')
+            // Microsoft redesigned the dashboard (Oct 2026): section#dailyset was replaced
+            // by React Aria DisclosurePanel. The HTML may not contain "Daily Set" text
+            // before React hydrates, so also check the parsed React snapshot.
+            // Hardened (2026-10-17): visual signals alone are insufficient. Must also
+            // verify (1) not on a login redirect, (2) account data present in snapshot.
+            // This prevents misidentifying login-failure or partially-loaded pages.
+            const pageUrl = page.url()
+            const isLoginRedirect = /login\.live\.com|account\.microsoft\.com/i.test(pageUrl)
+            const hasAccountData = snapshot.account.availablePoints !== null ||
+                                   snapshot.account.level !== null
+            const hasVisualSignal = /<section\b[^>]*\bid=["']dailyset["']/i.test(html) ||
+                                    /Daily Set/i.test(html) ||
+                                    snapshot.offers.length > 0
+            const dashboardRendered = !isLoginRedirect && hasAccountData && hasVisualSignal
             if (!dashboardRendered && !this.bot.isMobile) {
+                const reason = isLoginRedirect ? `login redirect to ${pageUrl}` :
+                               !hasAccountData ? 'no account data in snapshot' :
+                               'no Daily Set visual signal found'
                 throw new Error(
-                    'Rewards dashboard did not render (no section#dailyset) - likely a login/redirect issue, aborting'
+                    `Rewards dashboard did not render (${reason}) - likely a login/redirect issue, aborting`
                 )
             }
 
@@ -509,7 +526,7 @@ export default class BrowserFunc {
             await welcomeButton.click({ timeout: 5000 })
             this.bot.logger.info(this.bot.isMobile, 'BOOTSTRAP', '已关闭首次访问欢迎弹窗')
 
-            await page.waitForSelector('section#dailyset', { timeout: 15000 }).catch(() => undefined)
+            await page.waitForSelector('section#dailyset, button:has-text("Daily Set")', { timeout: 15000 }).catch(() => undefined)
         } catch (error) {
             this.bot.logger.warn(
                 this.bot.isMobile,
